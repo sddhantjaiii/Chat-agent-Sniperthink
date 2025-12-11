@@ -19,6 +19,13 @@ PostgreSQL database with multi-tenant isolation via `user_id`. Run `npm run migr
 | `meetings` | Booked meetings via Google Calendar |
 | `message_delivery_status` | Message delivery lifecycle (sent/delivered/read) |
 | `conversation_archives` | Archive tracking when agents are relinked |
+| `contacts` | Contact management with auto-sync from extractions |
+| `templates` | WhatsApp message templates with Meta approval tracking |
+| `template_variables` | Variable mappings for templates with auto-fill support |
+| `template_sends` | Individual template message send tracking |
+| `campaigns` | Bulk messaging campaigns with scheduling |
+| `campaign_triggers` | Campaign automation triggers (immediate/scheduled/event) |
+| `campaign_recipients` | Individual recipient tracking within campaigns |
 
 ---
 
@@ -227,12 +234,184 @@ Archive tracking when agents are relinked.
 
 ---
 
+### `contacts`
+Contact management with auto-sync from extractions and E.164 phone format.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `contact_id` | VARCHAR(50) | PRIMARY KEY |
+| `user_id` | VARCHAR(50) | FK → users, NOT NULL |
+| `phone` | VARCHAR(20) | NOT NULL (E.164 format: +14155551234) |
+| `name` | VARCHAR(255) | |
+| `email` | VARCHAR(255) | |
+| `company` | VARCHAR(255) | |
+| `tags` | TEXT[] | DEFAULT '{}' (array for segmentation) |
+| `source` | VARCHAR(20) | NOT NULL, DEFAULT 'MANUAL', CHECK IN ('EXTRACTION', 'IMPORT', 'MANUAL') |
+| `extraction_id` | UUID | FK → extractions, NULL |
+| `conversation_id` | VARCHAR(50) | FK → conversations, NULL |
+| `is_active` | BOOLEAN | DEFAULT true |
+| `opted_out` | BOOLEAN | DEFAULT false |
+| `opted_out_at` | TIMESTAMP | |
+| `last_contacted_at` | TIMESTAMP | |
+| `total_messages_sent` | INTEGER | DEFAULT 0 |
+| `total_messages_received` | INTEGER | DEFAULT 0 |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Unique**: `(user_id, phone)`
+
+---
+
+### `templates`
+WhatsApp message templates with Meta approval tracking.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `template_id` | VARCHAR(50) | PRIMARY KEY |
+| `user_id` | VARCHAR(50) | FK → users, NOT NULL |
+| `phone_number_id` | VARCHAR(50) | FK → phone_numbers, NOT NULL |
+| `name` | VARCHAR(512) | NOT NULL |
+| `category` | VARCHAR(20) | NOT NULL, CHECK IN ('MARKETING', 'UTILITY', 'AUTHENTICATION') |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT 'DRAFT', CHECK IN ('DRAFT', 'PENDING', 'APPROVED', 'REJECTED', 'PAUSED', 'DISABLED') |
+| `language` | VARCHAR(10) | NOT NULL, DEFAULT 'en' |
+| `components` | JSONB | NOT NULL, DEFAULT '{}' |
+| `meta_template_id` | VARCHAR(100) | Meta's template ID after submission |
+| `rejection_reason` | TEXT | |
+| `submitted_at` | TIMESTAMP | |
+| `approved_at` | TIMESTAMP | |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Unique**: `(phone_number_id, name)`
+
+**Components structure**: `{ header?: {...}, body: {...}, footer?: {...}, buttons?: [...] }`
+
+---
+
+### `template_variables`
+Maps custom variable names to WhatsApp positional variables with auto-fill support.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `variable_id` | VARCHAR(50) | PRIMARY KEY |
+| `template_id` | VARCHAR(50) | FK → templates, NOT NULL |
+| `variable_name` | VARCHAR(100) | NOT NULL |
+| `position` | INTEGER | NOT NULL, CHECK 1-10 (maps to {{1}}-{{10}}) |
+| `component_type` | VARCHAR(20) | NOT NULL, DEFAULT 'BODY', CHECK IN ('HEADER', 'BODY', 'BUTTON') |
+| `extraction_field` | VARCHAR(50) | CHECK IN ('name', 'email', 'company', 'customer_phone', 'intent_level', 'urgency_level', 'lead_status_tag', 'total_score', 'smart_notification') |
+| `default_value` | VARCHAR(255) | |
+| `sample_value` | VARCHAR(255) | |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Unique**: `(template_id, position)` and `(template_id, variable_name)`
+
+---
+
+### `template_sends`
+Tracks individual template message sends with delivery status.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `send_id` | VARCHAR(50) | PRIMARY KEY |
+| `template_id` | VARCHAR(50) | FK → templates, NOT NULL |
+| `conversation_id` | VARCHAR(50) | FK → conversations, NULL |
+| `campaign_id` | VARCHAR(50) | |
+| `customer_phone` | VARCHAR(50) | NOT NULL |
+| `variable_values` | JSONB | DEFAULT '{}' (maps position to value) |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING', CHECK IN ('PENDING', 'SENT', 'DELIVERED', 'READ', 'FAILED') |
+| `platform_message_id` | VARCHAR(100) | Meta's message ID after sending |
+| `error_code` | VARCHAR(50) | |
+| `error_message` | TEXT | |
+| `sent_at` | TIMESTAMP | |
+| `delivered_at` | TIMESTAMP | |
+| `read_at` | TIMESTAMP | |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Variable values structure**: `{ "1": "John", "2": "Acme Corp" }`
+
+---
+
+### `campaigns`
+Bulk messaging campaigns with scheduling and event triggers.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `campaign_id` | VARCHAR(50) | PRIMARY KEY |
+| `user_id` | VARCHAR(50) | FK → users, NOT NULL |
+| `template_id` | VARCHAR(50) | FK → templates, NOT NULL |
+| `phone_number_id` | VARCHAR(50) | FK → phone_numbers, NOT NULL |
+| `name` | VARCHAR(255) | NOT NULL |
+| `description` | TEXT | |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT 'DRAFT', CHECK IN ('DRAFT', 'SCHEDULED', 'RUNNING', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED') |
+| `recipient_filter` | JSONB | DEFAULT '{}' |
+| `total_recipients` | INTEGER | DEFAULT 0 |
+| `sent_count` | INTEGER | DEFAULT 0 |
+| `delivered_count` | INTEGER | DEFAULT 0 |
+| `read_count` | INTEGER | DEFAULT 0 |
+| `failed_count` | INTEGER | DEFAULT 0 |
+| `started_at` | TIMESTAMP | |
+| `completed_at` | TIMESTAMP | |
+| `paused_at` | TIMESTAMP | |
+| `last_error` | TEXT | |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Recipient filter structure**: `{ tags?: string[], excludeTags?: string[], contactIds?: string[] }`
+
+---
+
+### `campaign_triggers`
+Defines campaign execution triggers (immediate, scheduled, or event-based).
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `trigger_id` | VARCHAR(50) | PRIMARY KEY |
+| `campaign_id` | VARCHAR(50) | FK → campaigns, NOT NULL |
+| `trigger_type` | VARCHAR(20) | NOT NULL, CHECK IN ('IMMEDIATE', 'SCHEDULED', 'EVENT') |
+| `scheduled_at` | TIMESTAMP | For SCHEDULED triggers |
+| `event_type` | VARCHAR(30) | CHECK IN ('NEW_EXTRACTION', 'LEAD_HOT', 'LEAD_WARM', 'TAG_ADDED', 'CONVERSATION_ENDED') |
+| `event_config` | JSONB | DEFAULT '{}' |
+| `is_active` | BOOLEAN | DEFAULT true |
+| `last_triggered_at` | TIMESTAMP | |
+| `trigger_count` | INTEGER | DEFAULT 0 |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Event config examples**: `{ "tag": "vip" }` or `{ "inactiveMinutes": 60 }`
+
+---
+
+### `campaign_recipients`
+Tracks individual recipient status within campaigns.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `recipient_id` | VARCHAR(50) | PRIMARY KEY |
+| `campaign_id` | VARCHAR(50) | FK → campaigns, NOT NULL |
+| `contact_id` | VARCHAR(50) | FK → contacts, NOT NULL |
+| `template_send_id` | VARCHAR(50) | FK → template_sends, NULL |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT 'PENDING', CHECK IN ('PENDING', 'QUEUED', 'SENT', 'DELIVERED', 'READ', 'FAILED', 'SKIPPED') |
+| `skip_reason` | VARCHAR(50) | CHECK IN ('OPTED_OUT', 'RATE_LIMITED', 'INVALID_PHONE', 'DUPLICATE', 'RECENTLY_CONTACTED') |
+| `error_message` | TEXT | |
+| `queued_at` | TIMESTAMP | |
+| `sent_at` | TIMESTAMP | |
+| `delivered_at` | TIMESTAMP | |
+| `read_at` | TIMESTAMP | |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Unique**: `(campaign_id, contact_id)`
+
+---
+
 ## Triggers
 
 ### `update_updated_at_column()`
 Auto-updates `updated_at` on row modification.
 
-**Applied to**: `users`, `phone_numbers`, `agents`, `google_calendar_tokens`, `meetings`
+**Applied to**: `users`, `phone_numbers`, `agents`, `google_calendar_tokens`, `meetings`, `contacts`, `templates`, `template_variables`, `template_sends`, `campaigns`, `campaign_triggers`, `campaign_recipients`
 
 ```sql
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -249,13 +428,19 @@ $$ language 'plpgsql';
 ## Key Relationships
 
 ```
-users (1) ─────┬───── (*) phone_numbers
+users (1) ─────┬───── (*) phone_numbers ─────┬───── (*) templates ──────┬───── (*) template_variables
+              │                              │                          │
+              │                              │                          ├───── (*) template_sends
+              │                              │                          │
+              │                              └───── (*) campaigns ──────┬───── (*) campaign_triggers
+              │                                                         │
+              │                                                         └───── (*) campaign_recipients ───→ (1) contacts
               │
               ├───── (*) agents ──────── (*) conversations ──────── (*) messages
               │                                    │
-              ├───── (1) credits                   ├───── (*) extractions
+              ├───── (1) credits                   ├───── (*) extractions ───→ (1) contacts
               │                                    │
               ├───── (1) google_calendar_tokens    └───── (*) meetings
               │
-              └───── (*) extractions
+              └───── (*) contacts
 ```
