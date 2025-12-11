@@ -257,14 +257,25 @@ export class App {
 
     // Users management
     this.app.get('/admin/users', adminController.listUsers);
+    this.app.post('/admin/users', adminController.createUser);
     this.app.get('/admin/users/:userId', adminController.getUser);
+    this.app.patch('/admin/users/:userId', adminController.updateUser);
     this.app.delete('/admin/users/:userId', adminController.deleteUser);
+    this.app.post('/admin/users/:userId/credits', adminController.addUserCredits);
 
-    // Phone Numbers management
+    // User-specific phone numbers (admin manages user's phone numbers)
+    this.app.post('/admin/users/:userId/phone-numbers', adminController.addUserPhoneNumber);
+    this.app.delete('/admin/users/:userId/phone-numbers/:phoneNumberId', adminController.deleteUserPhoneNumber);
+
+    // User-specific agents (admin manages user's agents with OpenAI prompts)
+    this.app.post('/admin/users/:userId/agents', adminController.createUserAgent);
+    this.app.patch('/admin/users/:userId/agents/:agentId', adminController.updateUserAgent);
+
+    // Phone Numbers management (global view)
     this.app.get('/admin/phone-numbers', adminController.listPhoneNumbers);
     this.app.patch('/admin/phone-numbers/:phoneNumberId', adminController.updatePhoneNumber);
 
-    // Agents management
+    // Agents management (global view)
     this.app.get('/admin/agents', adminController.listAgents);
     this.app.get('/admin/agents/:agentId', adminController.getAgent);
     this.app.delete('/admin/agents/:agentId', adminController.deleteAgent);

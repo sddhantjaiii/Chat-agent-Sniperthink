@@ -232,6 +232,147 @@ export async function getUser(req: Request, res: Response): Promise<void> {
 }
 
 /**
+ * POST /admin/users
+ * Create new user
+ */
+export async function createUser(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { user_id, email, initial_credits } = req.body;
+
+    if (!user_id || !email) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'user_id and email are required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Check if user already exists
+        const existingUser = await userService.getUserById(user_id);
+        if (existingUser) {
+            res.status(409).json({
+                error: 'Conflict',
+                message: 'User already exists',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Create user
+        const result = await db.query<User>(
+            'INSERT INTO users (user_id, email, created_at) VALUES ($1, $2, NOW()) RETURNING *',
+            [user_id, email]
+        );
+
+        const user = result.rows[0];
+
+        // Initialize credits if provided
+        if (initial_credits && initial_credits > 0) {
+            await db.query(
+                'INSERT INTO credits (user_id, remaining_credits) VALUES ($1, $2)',
+                [user_id, initial_credits]
+            );
+        } else {
+            // Initialize with 0 credits
+            await db.query(
+                'INSERT INTO credits (user_id, remaining_credits) VALUES ($1, 0)',
+                [user_id]
+            );
+        }
+
+        logger.info('User created by admin', { correlationId, userId: user_id });
+
+        res.status(201).json({
+            success: true,
+            data: {
+                user,
+                initial_credits: initial_credits || 0,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to create user', { correlationId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to create user',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * PATCH /admin/users/:userId
+ * Update user details
+ */
+export async function updateUser(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId } = req.params;
+    const { email } = req.body;
+
+    try {
+        const fields: string[] = [];
+        const values: unknown[] = [];
+        let paramIndex = 1;
+
+        if (email !== undefined) {
+            fields.push(`email = $${paramIndex}`);
+            values.push(email);
+            paramIndex++;
+        }
+
+        if (fields.length === 0) {
+            res.status(400).json({
+                error: 'Bad Request',
+                message: 'No fields to update',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        values.push(userId);
+
+        const result = await db.query<User>(
+            `UPDATE users SET ${fields.join(', ')} WHERE user_id = $${paramIndex} RETURNING *`,
+            values
+        );
+
+        if (!result.rows[0]) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'User not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        logger.info('User updated by admin', { correlationId, userId });
+
+        res.status(200).json({
+            success: true,
+            data: result.rows[0],
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to update user', { correlationId, userId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to update user',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
  * DELETE /admin/users/:userId
  * Delete user
  */
@@ -264,6 +405,71 @@ export async function deleteUser(req: Request, res: Response): Promise<void> {
         res.status(500).json({
             error: 'Internal Server Error',
             message: 'Failed to delete user',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * POST /admin/users/:userId/credits
+ * Add credits to user
+ */
+export async function addUserCredits(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId } = req.params;
+    const { amount } = req.body;
+
+    if (!amount || amount <= 0) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'amount must be a positive number',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Verify user exists
+        const user = await userService.getUserById(userId!);
+        if (!user) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'User not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Add credits
+        const result = await db.query<{ remaining_credits: number }>(
+            `INSERT INTO credits (user_id, remaining_credits) 
+             VALUES ($1, $2)
+             ON CONFLICT (user_id) 
+             DO UPDATE SET remaining_credits = credits.remaining_credits + EXCLUDED.remaining_credits
+             RETURNING remaining_credits`,
+            [userId, amount]
+        );
+
+        logger.info('Credits added by admin', { correlationId, userId, amount });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                user_id: userId,
+                credits_added: amount,
+                remaining_credits: result.rows[0]?.remaining_credits || 0,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to add credits', { correlationId, userId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to add credits',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -396,6 +602,140 @@ export async function updatePhoneNumber(req: Request, res: Response): Promise<vo
     }
 }
 
+/**
+ * POST /admin/users/:userId/phone-numbers
+ * Add phone number to user (WhatsApp/Instagram)
+ */
+export async function addUserPhoneNumber(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId } = req.params;
+    const { id, platform, meta_phone_number_id, access_token, display_name, waba_id } = req.body;
+
+    if (!id || !platform || !meta_phone_number_id || !access_token) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'id, platform, meta_phone_number_id, and access_token are required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    const validPlatforms = ['whatsapp', 'instagram', 'webchat'];
+    if (!validPlatforms.includes(platform)) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: `platform must be one of: ${validPlatforms.join(', ')}`,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Verify user exists
+        const user = await userService.getUserById(userId!);
+        if (!user) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'User not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Check if phone number already exists
+        const existing = await db.query(
+            'SELECT id FROM phone_numbers WHERE id = $1',
+            [id]
+        );
+
+        if (existing.rows[0]) {
+            res.status(409).json({
+                error: 'Conflict',
+                message: 'Phone number already exists',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Insert phone number
+        const result = await db.query<PhoneNumberWithRateLimit>(
+            `INSERT INTO phone_numbers 
+             (id, user_id, platform, meta_phone_number_id, access_token, display_name, waba_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+             RETURNING *`,
+            [id, userId, platform, meta_phone_number_id, access_token, display_name, waba_id]
+        );
+
+        logger.info('Phone number added by admin', { correlationId, userId, phoneNumberId: id });
+
+        res.status(201).json({
+            success: true,
+            data: result.rows[0],
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to add phone number', { correlationId, userId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to add phone number',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * DELETE /admin/users/:userId/phone-numbers/:phoneNumberId
+ * Delete phone number from user
+ */
+export async function deleteUserPhoneNumber(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId, phoneNumberId } = req.params;
+
+    try {
+        // Verify phone number belongs to user
+        const result = await db.query(
+            'SELECT id FROM phone_numbers WHERE id = $1 AND user_id = $2',
+            [phoneNumberId, userId]
+        );
+
+        if (!result.rows[0]) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'Phone number not found for this user',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Delete phone number
+        await db.query('DELETE FROM phone_numbers WHERE id = $1', [phoneNumberId]);
+
+        logger.info('Phone number deleted by admin', { correlationId, userId, phoneNumberId });
+
+        res.status(200).json({
+            success: true,
+            message: 'Phone number deleted successfully',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to delete phone number', { correlationId, userId, phoneNumberId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to delete phone number',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
 // =====================================
 // Agents
 // =====================================
@@ -476,6 +816,163 @@ export async function getAgent(req: Request, res: Response): Promise<void> {
         res.status(500).json({
             error: 'Internal Server Error',
             message: 'Failed to get agent',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * POST /admin/users/:userId/agents
+ * Create agent for user with OpenAI prompt
+ */
+export async function createUserAgent(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId } = req.params;
+    const { phone_number_id, prompt_id, name, description } = req.body;
+
+    if (!phone_number_id || !prompt_id || !name) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'phone_number_id, prompt_id, and name are required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Verify user exists
+        const user = await userService.getUserById(userId!);
+        if (!user) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'User not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Verify phone number exists and belongs to user
+        const phoneResult = await db.query(
+            'SELECT id FROM phone_numbers WHERE id = $1 AND user_id = $2',
+            [phone_number_id, userId]
+        );
+
+        if (!phoneResult.rows[0]) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'Phone number not found for this user',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Create agent
+        const agent_id = uuidv4();
+        const result = await db.query<Agent>(
+            `INSERT INTO agents 
+             (agent_id, user_id, phone_number_id, prompt_id, name, description, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             RETURNING *`,
+            [agent_id, userId, phone_number_id, prompt_id, name, description]
+        );
+
+        logger.info('Agent created by admin', { correlationId, userId, agentId: agent_id });
+
+        res.status(201).json({
+            success: true,
+            data: result.rows[0],
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to create agent', { correlationId, userId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to create agent',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * PATCH /admin/users/:userId/agents/:agentId
+ * Update agent for user
+ */
+export async function updateUserAgent(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId, agentId } = req.params;
+    const { name, description, prompt_id } = req.body;
+
+    try {
+        const fields: string[] = [];
+        const values: unknown[] = [];
+        let paramIndex = 1;
+
+        if (name !== undefined) {
+            fields.push(`name = $${paramIndex}`);
+            values.push(name);
+            paramIndex++;
+        }
+
+        if (description !== undefined) {
+            fields.push(`description = $${paramIndex}`);
+            values.push(description);
+            paramIndex++;
+        }
+
+        if (prompt_id !== undefined) {
+            fields.push(`prompt_id = $${paramIndex}`);
+            values.push(prompt_id);
+            paramIndex++;
+        }
+
+        if (fields.length === 0) {
+            res.status(400).json({
+                error: 'Bad Request',
+                message: 'No fields to update',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        values.push(agentId, userId);
+
+        const result = await db.query<Agent>(
+            `UPDATE agents SET ${fields.join(', ')} 
+             WHERE agent_id = $${paramIndex} AND user_id = $${paramIndex + 1}
+             RETURNING *`,
+            values
+        );
+
+        if (!result.rows[0]) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'Agent not found for this user',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        logger.info('Agent updated by admin', { correlationId, userId, agentId });
+
+        res.status(200).json({
+            success: true,
+            data: result.rows[0],
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to update agent', { correlationId, userId, agentId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to update agent',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -1292,13 +1789,20 @@ export const adminController = {
     // Users
     listUsers,
     getUser,
+    createUser,
+    updateUser,
     deleteUser,
+    addUserCredits,
     // Phone Numbers
     listPhoneNumbers,
     updatePhoneNumber,
+    addUserPhoneNumber,
+    deleteUserPhoneNumber,
     // Agents
     listAgents,
     getAgent,
+    createUserAgent,
+    updateUserAgent,
     deleteAgent,
     // Conversations
     listConversations,
