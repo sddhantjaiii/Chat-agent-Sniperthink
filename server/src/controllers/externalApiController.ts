@@ -53,13 +53,13 @@ function generateId(prefix: string): string {
 // POST /api/v1/users - Create a new user
 export async function createUser(req: Request, res: Response): Promise<void> {
     const correlationId = getCorrelationId(req);
-    const { email, company_name } = req.body;
+    const { user_id, email, company_name } = req.body;
 
-    if (!email) {
+    if (!user_id || !email) {
         res.status(400).json({
             success: false,
             error: 'Bad Request',
-            message: 'email is required',
+            message: 'user_id and email are required',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -80,13 +80,11 @@ export async function createUser(req: Request, res: Response): Promise<void> {
     }
 
     try {
-        const userId = generateId('usr');
-
         const result = await db.query<User>(
             `INSERT INTO users (user_id, email, company_name, created_at, updated_at)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              RETURNING user_id, email, company_name, created_at, updated_at`,
-            [userId, email, company_name || null]
+            [user_id, email, company_name || null]
         );
 
         // Initialize credits for new user
@@ -94,10 +92,10 @@ export async function createUser(req: Request, res: Response): Promise<void> {
             `INSERT INTO credits (user_id, remaining_credits, total_used, last_updated)
              VALUES ($1, 100, 0, CURRENT_TIMESTAMP)
              ON CONFLICT (user_id) DO NOTHING`,
-            [userId]
+            [user_id]
         );
 
-        logger.info('User created via external API', { correlationId, userId, email });
+        logger.info('User created via external API', { correlationId, userId: user_id, email });
 
         res.status(201).json({
             success: true,
@@ -110,7 +108,7 @@ export async function createUser(req: Request, res: Response): Promise<void> {
             res.status(409).json({
                 success: false,
                 error: 'Conflict',
-                message: 'User with this email already exists',
+                message: 'User with this user_id or email already exists',
                 timestamp: new Date().toISOString(),
                 correlationId,
             });
@@ -171,6 +169,209 @@ export async function getUser(req: Request, res: Response): Promise<void> {
             success: false,
             error: 'Internal Server Error',
             message: 'Failed to get user',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+// =====================================
+// CREDITS MANAGEMENT
+// =====================================
+
+// GET /api/v1/credits - Get user credits
+export async function getCredits(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const userId = req.headers['x-user-id'] as string;
+
+    if (!userId) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'x-user-id header is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const result = await db.query(
+            `SELECT user_id, remaining_credits, total_used, last_updated
+             FROM credits WHERE user_id = $1`,
+            [userId]
+        );
+
+        if (result.rows.length === 0) {
+            // Return default credits if user has no record
+            res.status(200).json({
+                success: true,
+                data: {
+                    user_id: userId,
+                    remaining_credits: 0,
+                    total_used: 0,
+                    last_updated: null,
+                },
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        logger.info('Credits retrieved via external API', { correlationId, userId });
+
+        res.status(200).json({
+            success: true,
+            data: result.rows[0],
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to get credits', { correlationId, userId, error });
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: 'Failed to get credits',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+// POST /api/v1/credits/adjust - Adjust user credits (add or deduct)
+export async function adjustCredits(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const userId = req.headers['x-user-id'] as string;
+    const { amount, operation, reason } = req.body;
+
+    if (!userId) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'x-user-id header is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (amount === undefined || typeof amount !== 'number') {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'amount is required and must be a number',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (amount <= 0) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'amount must be a positive number',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (!operation || !['add', 'deduct', 'set'].includes(operation)) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'operation is required and must be one of: add, deduct, set',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        let query: string;
+        let params: unknown[];
+        
+        if (operation === 'add') {
+            // Add credits (upsert)
+            query = `
+                INSERT INTO credits (user_id, remaining_credits, total_used, last_updated)
+                VALUES ($1, $2, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id)
+                DO UPDATE SET 
+                    remaining_credits = credits.remaining_credits + $2,
+                    last_updated = CURRENT_TIMESTAMP
+                RETURNING user_id, remaining_credits, total_used, last_updated
+            `;
+            params = [userId, amount];
+        } else if (operation === 'deduct') {
+            // Deduct credits (must have enough)
+            query = `
+                UPDATE credits 
+                SET remaining_credits = remaining_credits - $2,
+                    total_used = total_used + $2,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE user_id = $1 AND remaining_credits >= $2
+                RETURNING user_id, remaining_credits, total_used, last_updated
+            `;
+            params = [userId, amount];
+        } else {
+            // Set absolute value
+            query = `
+                INSERT INTO credits (user_id, remaining_credits, total_used, last_updated)
+                VALUES ($1, $2, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id)
+                DO UPDATE SET 
+                    remaining_credits = $2,
+                    last_updated = CURRENT_TIMESTAMP
+                RETURNING user_id, remaining_credits, total_used, last_updated
+            `;
+            params = [userId, amount];
+        }
+
+        const result = await db.query(query, params);
+
+        if (result.rows.length === 0) {
+            res.status(400).json({
+                success: false,
+                error: 'Bad Request',
+                message: operation === 'deduct' 
+                    ? 'Insufficient credits or user not found' 
+                    : 'User not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        logger.info('Credits adjusted via external API', { 
+            correlationId, 
+            userId, 
+            operation, 
+            amount,
+            reason: reason || 'not specified',
+            newBalance: result.rows[0].remaining_credits,
+        });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                ...result.rows[0],
+                adjustment: {
+                    operation,
+                    amount,
+                    reason: reason || null,
+                },
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to adjust credits', { correlationId, userId, operation, amount, error });
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: 'Failed to adjust credits',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -2201,6 +2402,10 @@ export const externalApiController = {
     // Users
     createUser,
     getUser,
+    
+    // Credits
+    getCredits,
+    adjustCredits,
     
     // Phone Numbers
     listPhoneNumbers,

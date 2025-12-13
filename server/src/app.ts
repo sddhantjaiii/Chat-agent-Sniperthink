@@ -349,6 +349,10 @@ export class App {
     this.app.post('/api/v1/users', externalApiController.createUser);
     this.app.get('/api/v1/users/:userId', externalApiController.getUser);
     
+    // Credits
+    this.app.get('/api/v1/credits', externalApiController.getCredits);
+    this.app.post('/api/v1/credits/adjust', externalApiController.adjustCredits);
+    
     // Phone Numbers
     this.app.get('/api/v1/phone-numbers', externalApiController.listPhoneNumbers);
     this.app.post('/api/v1/phone-numbers', externalApiController.createPhoneNumber);

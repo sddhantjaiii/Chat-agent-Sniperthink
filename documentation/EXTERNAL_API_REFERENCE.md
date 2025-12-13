@@ -110,6 +110,7 @@ Content-Type: application/json
 **Request:**
 ```json
 {
+  "user_id": "usr_abc123def456",
   "email": "business@example.com",
   "company_name": "Acme Inc"
 }
@@ -117,6 +118,7 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| user_id | string | Yes | Unique user identifier (from your system) |
 | email | string | Yes | Unique email address |
 | company_name | string | No | Company/Business name |
 
@@ -141,7 +143,7 @@ Content-Type: application/json
 {
   "success": false,
   "error": "Conflict",
-  "message": "User with this email already exists",
+  "message": "User with this user_id or email already exists",
   "timestamp": "2025-12-13T10:00:00.000Z",
   "correlationId": "req_abc123"
 }
