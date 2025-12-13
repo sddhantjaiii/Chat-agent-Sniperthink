@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { sseManager } from '../utils/sseManager';
 import { cache } from '../utils/cacheManager';
 import { QueuedMessage } from '../models/types';
+import { platformsConfig } from '../config';
 
 /**
  * Webchat Controller
@@ -103,7 +104,7 @@ export class WebchatController {
 
                 // Generate embed code and config URL
                 const embedCode = this.generateEmbedCode(webchat_id, name);
-                const baseUrl = process.env['BASE_URL'] || 'http://localhost:3000';
+                const baseUrl = platformsConfig.webchatWidgetUrl;
                 const configUrl = `${baseUrl}/widget-config.html?agent_id=${webchat_id}`;
 
                 res.status(201).json({
@@ -644,7 +645,7 @@ export class WebchatController {
                 return;
             }
 
-            const baseUrl = process.env['BASE_URL'] || 'http://localhost:3000';
+            const baseUrl = platformsConfig.webchatWidgetUrl;
             const configUrl = `${baseUrl}/widget-config.html?agent_id=${webchat_id}`;
 
             res.status(200).json({
@@ -672,7 +673,7 @@ export class WebchatController {
      * Simple 2-line embed - just copy and paste!
      */
     private generateEmbedCode(webchat_id: string, name: string, primaryColor?: string, secondaryColor?: string): string {
-        const baseUrl = process.env['BASE_URL'] || 'http://localhost:3000';
+        const baseUrl = platformsConfig.webchatWidgetUrl;
         const primary = primaryColor || '#3B82F6';
         const secondary = secondaryColor || '#EFF6FF';
 

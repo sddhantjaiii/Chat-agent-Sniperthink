@@ -33,7 +33,7 @@ import { campaignService } from '../services/campaignService';
 import { templateService } from '../services/templateService';
 import { sendTemplateMessage } from '../services/messageService';
 import { deductCredits, getUserCredits, InsufficientCreditsError } from '../services/creditService';
-import { campaignsConfig } from '../config';
+import { campaignsConfig, platformsConfig } from '../config';
 import type { PhoneNumber, Template, Campaign, TemplateComponents, Agent, User, Platform } from '../models/types';
 
 // Helper to get correlation ID
@@ -2399,6 +2399,366 @@ function componentsToArray(components: unknown): unknown[] {
     return [];
 }
 
+// =====================================
+// WEBCHAT / WIDGET MANAGEMENT
+// =====================================
+
+/**
+ * POST /api/v1/webchat/channels
+ * Create a new webchat channel with agent and get embed code
+ */
+export async function createWebchatChannel(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { user_id, prompt_id, name } = req.body;
+
+    if (!user_id || !prompt_id || !name) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'user_id, prompt_id, and name are required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Verify user exists
+        const userCheck = await db.query('SELECT 1 FROM users WHERE user_id = $1', [user_id]);
+        if (userCheck.rows.length === 0) {
+            res.status(404).json({
+                success: false,
+                error: 'Not Found',
+                message: `User with ID ${user_id} not found`,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Generate unique IDs
+        const randomString = Math.random().toString(36).substring(2, 11);
+        const webchat_id = `webchat_${user_id}_${randomString}`;
+        const phone_number_id = `pn_${webchat_id}`;
+        const agent_id = `agent_${webchat_id}`;
+
+        // Start transaction
+        await db.query('BEGIN');
+
+        try {
+            // Create phone_number record for webchat
+            const phoneNumberResult = await db.query(
+                `INSERT INTO phone_numbers (id, user_id, platform, meta_phone_number_id, access_token, display_name, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+                 RETURNING *`,
+                [phone_number_id, user_id, 'webchat', webchat_id, 'not_needed', name]
+            );
+
+            // Create agent record linked to phone_number
+            await db.query(
+                `INSERT INTO agents (agent_id, user_id, phone_number_id, prompt_id, name, created_at)
+                 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                 RETURNING *`,
+                [agent_id, user_id, phone_number_id, prompt_id, name]
+            );
+
+            // Commit transaction
+            await db.query('COMMIT');
+
+            // Generate embed code
+            const baseUrl = platformsConfig.webchatWidgetUrl;
+            const embedCode = generateWebchatEmbedCode(webchat_id, name, baseUrl);
+            const configUrl = `${baseUrl}/widget-config.html?agent_id=${webchat_id}`;
+
+            logger.info('Webchat channel created via external API', {
+                correlationId,
+                user_id,
+                webchat_id,
+                agent_id,
+            });
+
+            res.status(201).json({
+                success: true,
+                data: {
+                    webchat_id,
+                    phone_number_id,
+                    agent_id,
+                    prompt_id,
+                    name,
+                    embed_code: embedCode,
+                    config_url: configUrl,
+                    created_at: phoneNumberResult.rows[0].created_at,
+                },
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+        } catch (error) {
+            await db.query('ROLLBACK');
+            throw error;
+        }
+    } catch (error) {
+        logger.error('Error creating webchat channel via external API', {
+            correlationId,
+            error: (error as Error).message,
+        });
+
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: (error as Error).message,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /api/v1/webchat/channels
+ * List webchat channels for a user
+ */
+export async function listWebchatChannels(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const user_id = req.query.user_id as string;
+
+    if (!user_id) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'user_id query parameter is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const result = await db.query(
+            `SELECT 
+                pn.meta_phone_number_id as webchat_id,
+                pn.id as phone_number_id,
+                a.agent_id,
+                a.prompt_id,
+                pn.display_name as name,
+                pn.created_at,
+                pn.updated_at
+             FROM phone_numbers pn
+             LEFT JOIN agents a ON a.phone_number_id = pn.id
+             WHERE pn.user_id = $1 AND pn.platform = 'webchat'
+             ORDER BY pn.created_at DESC`,
+            [user_id]
+        );
+
+        const baseUrl = platformsConfig.webchatWidgetUrl;
+        const channels = result.rows.map(row => ({
+            ...row,
+            embed_code: generateWebchatEmbedCode(row.webchat_id, row.name, baseUrl),
+            config_url: `${baseUrl}/widget-config.html?agent_id=${row.webchat_id}`,
+        }));
+
+        logger.info('Listed webchat channels via external API', {
+            correlationId,
+            user_id,
+            count: channels.length,
+        });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                channels,
+                count: channels.length,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Error listing webchat channels', {
+            correlationId,
+            error: (error as Error).message,
+        });
+
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: (error as Error).message,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /api/v1/webchat/channels/:webchatId/embed
+ * Get embed code for a specific webchat channel
+ */
+export async function getWebchatEmbed(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const webchat_id = req.params.webchatId;
+
+    if (!webchat_id) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'webchatId parameter is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const result = await db.query(
+            `SELECT display_name FROM phone_numbers 
+             WHERE meta_phone_number_id = $1 AND platform = 'webchat'`,
+            [webchat_id]
+        );
+
+        if (result.rows.length === 0) {
+            res.status(404).json({
+                success: false,
+                error: 'Not Found',
+                message: `Webchat channel ${webchat_id} not found`,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        const name = result.rows[0].display_name;
+        const baseUrl = platformsConfig.webchatWidgetUrl;
+        const embedCode = generateWebchatEmbedCode(webchat_id, name, baseUrl);
+        const configUrl = `${baseUrl}/widget-config.html?agent_id=${webchat_id}`;
+
+        logger.info('Got webchat embed via external API', { correlationId, webchat_id });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                webchat_id,
+                name,
+                embed_code: embedCode,
+                config_url: configUrl,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Error getting webchat embed', {
+            correlationId,
+            error: (error as Error).message,
+        });
+
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: (error as Error).message,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * DELETE /api/v1/webchat/channels/:webchatId
+ * Delete a webchat channel
+ */
+export async function deleteWebchatChannel(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const webchat_id = req.params.webchatId;
+
+    if (!webchat_id) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'webchatId parameter is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        // Find phone_number_id for this webchat
+        const phoneResult = await db.query(
+            `SELECT id FROM phone_numbers 
+             WHERE meta_phone_number_id = $1 AND platform = 'webchat'`,
+            [webchat_id]
+        );
+
+        if (phoneResult.rows.length === 0) {
+            res.status(404).json({
+                success: false,
+                error: 'Not Found',
+                message: `Webchat channel ${webchat_id} not found`,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        const phone_number_id = phoneResult.rows[0].id;
+
+        // Start transaction
+        await db.query('BEGIN');
+
+        try {
+            // Delete agent first (FK constraint)
+            await db.query('DELETE FROM agents WHERE phone_number_id = $1', [phone_number_id]);
+
+            // Delete phone number
+            await db.query('DELETE FROM phone_numbers WHERE id = $1', [phone_number_id]);
+
+            await db.query('COMMIT');
+
+            logger.info('Deleted webchat channel via external API', { correlationId, webchat_id });
+
+            res.status(200).json({
+                success: true,
+                message: `Webchat channel ${webchat_id} deleted successfully`,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+        } catch (error) {
+            await db.query('ROLLBACK');
+            throw error;
+        }
+    } catch (error) {
+        logger.error('Error deleting webchat channel', {
+            correlationId,
+            error: (error as Error).message,
+        });
+
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: (error as Error).message,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * Generate embed code for webchat widget
+ */
+function generateWebchatEmbedCode(webchat_id: string, name: string, baseUrl: string, primaryColor = '#3B82F6', secondaryColor = '#EFF6FF'): string {
+    return `<!-- ${name} AI Chat Widget - Customizable Colors -->
+<webchat-widget 
+  agent-id="${webchat_id}"
+  primary-color="${primaryColor}"
+  secondary-color="${secondaryColor}">
+</webchat-widget>
+<script src="${baseUrl}/widget.js" async type="text/javascript"></script>
+
+<!-- 
+  Customize colors by changing the hex values:
+  - primary-color: Buttons & user messages (default: #3B82F6)
+  - secondary-color: Background accents (default: #EFF6FF)
+  
+  Or visit: ${baseUrl}/widget-config.html?agent_id=${webchat_id}
+  to customize colors visually and get updated embed code!
+-->`;
+}
+
 // Export controller
 export const externalApiController = {
     // Users
@@ -2440,4 +2800,10 @@ export const externalApiController = {
     sendSingleMessage,
     createExternalCampaign,
     getCampaignStatus,
+    
+    // Webchat / Widget
+    createWebchatChannel,
+    listWebchatChannels,
+    getWebchatEmbed,
+    deleteWebchatChannel,
 };

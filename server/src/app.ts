@@ -384,6 +384,12 @@ export class App {
     this.app.post('/api/v1/send', externalApiController.sendSingleMessage);
     this.app.post('/api/v1/campaign', externalApiController.createExternalCampaign);
     this.app.get('/api/v1/campaign/:campaignId', externalApiController.getCampaignStatus);
+    
+    // Webchat / Widget Management (External API for dashboard)
+    this.app.post('/api/v1/webchat/channels', externalApiController.createWebchatChannel);
+    this.app.get('/api/v1/webchat/channels', externalApiController.listWebchatChannels);
+    this.app.get('/api/v1/webchat/channels/:webchatId/embed', externalApiController.getWebchatEmbed);
+    this.app.delete('/api/v1/webchat/channels/:webchatId', externalApiController.deleteWebchatChannel);
 
     // Root endpoint
     this.app.get('/', (_req, res) => {

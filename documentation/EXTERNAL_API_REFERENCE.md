@@ -93,6 +93,11 @@ const response = await fetch(`${API_BASE}/api/v1/templates?phone_number_id=pn_12
 | POST | `/api/v1/send` | Send template message |
 | POST | `/api/v1/campaign` | Create campaign |
 | GET | `/api/v1/campaign/:campaignId` | Campaign status |
+| **Webchat/Widget** | | |
+| POST | `/api/v1/webchat/channels` | Create webchat channel |
+| GET | `/api/v1/webchat/channels?user_id=X` | List webchat channels |
+| GET | `/api/v1/webchat/channels/:webchatId/embed` | Get widget embed code |
+| DELETE | `/api/v1/webchat/channels/:webchatId` | Delete webchat channel |
 
 ---
 
@@ -1229,6 +1234,149 @@ export async function createCampaign(data: CreateCampaignRequest) {
 
 export async function getCampaignStatus(campaignId: string) {
   return apiCall<CampaignStatus>(`/api/v1/campaign/${campaignId}`);
+}
+
+// ============ Webchat / Widget ============
+
+export async function createWebchatChannel(data: { user_id: string; prompt_id: string; name: string }) {
+  return apiCall<WebchatChannel>('/api/v1/webchat/channels', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function listWebchatChannels(userId: string) {
+  return apiCall<{ channels: WebchatChannel[]; count: number }>(`/api/v1/webchat/channels?user_id=${userId}`);
+}
+
+export async function getWebchatEmbed(webchatId: string) {
+  return apiCall<WebchatEmbed>(`/api/v1/webchat/channels/${webchatId}/embed`);
+}
+
+export async function deleteWebchatChannel(webchatId: string) {
+  return apiCall<void>(`/api/v1/webchat/channels/${webchatId}`, {
+    method: 'DELETE',
+  });
+}
+```
+
+---
+
+## Webchat / Widget Management
+
+### Create Webchat Channel
+
+Create a new webchat channel with an AI agent. Returns embed code for your website.
+
+```http
+POST /api/v1/webchat/channels
+Content-Type: application/json
+```
+
+**Request:**
+```json
+{
+  "user_id": "usr_abc123",
+  "prompt_id": "prompt_sales_bot_v1",
+  "name": "Customer Support Chat"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| user_id | string | Yes | User identifier |
+| prompt_id | string | Yes | OpenAI Responses API prompt ID |
+| name | string | Yes | Display name for the chat widget |
+
+**Response (201 Created):**
+```json
+{
+  "success": true,
+  "data": {
+    "webchat_id": "webchat_usr_abc123_xyz789",
+    "phone_number_id": "pn_webchat_usr_abc123_xyz789",
+    "agent_id": "agent_webchat_usr_abc123_xyz789",
+    "prompt_id": "prompt_sales_bot_v1",
+    "name": "Customer Support Chat",
+    "embed_code": "<!-- Customer Support Chat AI Chat Widget -->\n<webchat-widget \n  agent-id=\"webchat_usr_abc123_xyz789\"\n  primary-color=\"#3B82F6\"\n  secondary-color=\"#EFF6FF\">\n</webchat-widget>\n<script src=\"https://your-api.com/widget.js\" async></script>",
+    "config_url": "https://your-api.com/widget-config.html?agent_id=webchat_usr_abc123_xyz789",
+    "created_at": "2025-12-13T10:00:00.000Z"
+  },
+  "timestamp": "2025-12-13T10:00:00.000Z",
+  "correlationId": "req_abc123"
+}
+```
+
+---
+
+### List Webchat Channels
+
+```http
+GET /api/v1/webchat/channels?user_id={userId}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "channels": [
+      {
+        "webchat_id": "webchat_usr_abc123_xyz789",
+        "phone_number_id": "pn_webchat_usr_abc123_xyz789",
+        "agent_id": "agent_webchat_usr_abc123_xyz789",
+        "prompt_id": "prompt_sales_bot_v1",
+        "name": "Customer Support Chat",
+        "embed_code": "...",
+        "config_url": "https://your-api.com/widget-config.html?agent_id=webchat_usr_abc123_xyz789",
+        "created_at": "2025-12-13T10:00:00.000Z"
+      }
+    ],
+    "count": 1
+  },
+  "timestamp": "2025-12-13T10:00:00.000Z",
+  "correlationId": "req_abc123"
+}
+```
+
+---
+
+### Get Widget Embed Code
+
+```http
+GET /api/v1/webchat/channels/{webchatId}/embed
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "webchat_id": "webchat_usr_abc123_xyz789",
+    "name": "Customer Support Chat",
+    "embed_code": "<!-- Customer Support Chat AI Chat Widget -->\n<webchat-widget \n  agent-id=\"webchat_usr_abc123_xyz789\"\n  primary-color=\"#3B82F6\"\n  secondary-color=\"#EFF6FF\">\n</webchat-widget>\n<script src=\"https://your-api.com/widget.js\" async></script>",
+    "config_url": "https://your-api.com/widget-config.html?agent_id=webchat_usr_abc123_xyz789"
+  },
+  "timestamp": "2025-12-13T10:00:00.000Z",
+  "correlationId": "req_abc123"
+}
+```
+
+---
+
+### Delete Webchat Channel
+
+```http
+DELETE /api/v1/webchat/channels/{webchatId}
+```
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Webchat channel webchat_usr_abc123_xyz789 deleted successfully",
+  "timestamp": "2025-12-13T10:00:00.000Z",
+  "correlationId": "req_abc123"
 }
 ```
 
