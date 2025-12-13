@@ -1273,7 +1273,7 @@ POST /api/v1/webchat/channels
 Content-Type: application/json
 ```
 
-**Request:**
+**Option 1: Create with new prompt_id**
 ```json
 {
   "user_id": "usr_abc123",
@@ -1282,11 +1282,23 @@ Content-Type: application/json
 }
 ```
 
+**Option 2: Copy from existing agent (reuse AI behavior)**
+```json
+{
+  "user_id": "usr_abc123",
+  "agent_id": "agent_whatsapp_xyz",
+  "name": "Website Chat (same AI as WhatsApp)"
+}
+```
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | user_id | string | Yes | User identifier |
-| prompt_id | string | Yes | OpenAI Responses API prompt ID |
+| prompt_id | string | One of | OpenAI Responses API prompt ID (creates new agent) |
+| agent_id | string | One of | Existing agent ID to copy prompt from (reuse AI behavior) |
 | name | string | Yes | Display name for the chat widget |
+
+> **Note:** Provide either `prompt_id` OR `agent_id`, not both. Using `agent_id` copies the AI behavior (prompt) from an existing agent, allowing you to have the same AI on multiple platforms (WhatsApp, Instagram, Webchat).
 
 **Response (201 Created):**
 ```json
@@ -1297,6 +1309,7 @@ Content-Type: application/json
     "phone_number_id": "pn_webchat_usr_abc123_xyz789",
     "agent_id": "agent_webchat_usr_abc123_xyz789",
     "prompt_id": "prompt_sales_bot_v1",
+    "source_agent_id": null,
     "name": "Customer Support Chat",
     "embed_code": "<!-- Customer Support Chat AI Chat Widget -->\n<webchat-widget \n  agent-id=\"webchat_usr_abc123_xyz789\"\n  primary-color=\"#3B82F6\"\n  secondary-color=\"#EFF6FF\">\n</webchat-widget>\n<script src=\"https://your-api.com/widget.js\" async></script>",
     "config_url": "https://your-api.com/widget-config.html?agent_id=webchat_usr_abc123_xyz789",

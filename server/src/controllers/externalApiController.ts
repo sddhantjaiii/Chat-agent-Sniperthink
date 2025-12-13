@@ -2406,16 +2406,44 @@ function componentsToArray(components: unknown): unknown[] {
 /**
  * POST /api/v1/webchat/channels
  * Create a new webchat channel with agent and get embed code
+ * 
+ * Supports two modes:
+ * 1. prompt_id - Create new agent with this OpenAI prompt
+ * 2. agent_id - Copy the prompt_id from an existing agent (reuse AI behavior)
  */
 export async function createWebchatChannel(req: Request, res: Response): Promise<void> {
     const correlationId = getCorrelationId(req);
-    const { user_id, prompt_id, name } = req.body;
+    const { user_id, prompt_id, agent_id: source_agent_id, name } = req.body;
 
-    if (!user_id || !prompt_id || !name) {
+    // Validate required fields
+    if (!user_id || !name) {
         res.status(400).json({
             success: false,
             error: 'Bad Request',
-            message: 'user_id, prompt_id, and name are required',
+            message: 'user_id and name are required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    // Must provide either prompt_id OR agent_id (not both, not neither)
+    if (!prompt_id && !source_agent_id) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'Either prompt_id or agent_id is required. Use prompt_id to create a new agent, or agent_id to copy an existing agent\'s AI behavior.',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (prompt_id && source_agent_id) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'Provide either prompt_id OR agent_id, not both.',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -2436,11 +2464,37 @@ export async function createWebchatChannel(req: Request, res: Response): Promise
             return;
         }
 
+        // Determine the prompt_id to use
+        let finalPromptId = prompt_id;
+        let sourceAgentInfo: { name: string; prompt_id: string } | null = null;
+
+        if (source_agent_id) {
+            // Look up the existing agent to copy its prompt_id
+            const agentResult = await db.query(
+                `SELECT prompt_id, name FROM agents WHERE agent_id = $1 AND user_id = $2`,
+                [source_agent_id, user_id]
+            );
+
+            if (agentResult.rows.length === 0) {
+                res.status(404).json({
+                    success: false,
+                    error: 'Not Found',
+                    message: `Agent ${source_agent_id} not found for user ${user_id}`,
+                    timestamp: new Date().toISOString(),
+                    correlationId,
+                });
+                return;
+            }
+
+            sourceAgentInfo = agentResult.rows[0];
+            finalPromptId = sourceAgentInfo!.prompt_id;
+        }
+
         // Generate unique IDs
         const randomString = Math.random().toString(36).substring(2, 11);
         const webchat_id = `webchat_${user_id}_${randomString}`;
         const phone_number_id = `pn_${webchat_id}`;
-        const agent_id = `agent_${webchat_id}`;
+        const new_agent_id = `agent_${webchat_id}`;
 
         // Start transaction
         await db.query('BEGIN');
@@ -2459,7 +2513,7 @@ export async function createWebchatChannel(req: Request, res: Response): Promise
                 `INSERT INTO agents (agent_id, user_id, phone_number_id, prompt_id, name, created_at)
                  VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
                  RETURNING *`,
-                [agent_id, user_id, phone_number_id, prompt_id, name]
+                [new_agent_id, user_id, phone_number_id, finalPromptId, name]
             );
 
             // Commit transaction
@@ -2474,7 +2528,8 @@ export async function createWebchatChannel(req: Request, res: Response): Promise
                 correlationId,
                 user_id,
                 webchat_id,
-                agent_id,
+                agent_id: new_agent_id,
+                source_agent_id: source_agent_id || null,
             });
 
             res.status(201).json({
@@ -2482,8 +2537,9 @@ export async function createWebchatChannel(req: Request, res: Response): Promise
                 data: {
                     webchat_id,
                     phone_number_id,
-                    agent_id,
-                    prompt_id,
+                    agent_id: new_agent_id,
+                    prompt_id: finalPromptId,
+                    source_agent_id: source_agent_id || null,
                     name,
                     embed_code: embedCode,
                     config_url: configUrl,
