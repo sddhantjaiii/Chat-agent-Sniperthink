@@ -391,11 +391,15 @@ export class App {
 
   public async initialize(): Promise<void> {
     try {
+      logger.info('Starting application initialization...');
+      
       // Initialize database connection
+      logger.info('Connecting to database...');
       await db.connect();
       logger.info('Database connection initialized');
 
       // Initialize in-memory storage
+      logger.info('Initializing storage...');
       await initializeStorage();
       logger.info('In-memory storage initialized');
 
@@ -420,6 +424,7 @@ export class App {
   public listen(): void {
     const port = appConfig.port;
     const host = '0.0.0.0'; // Listen on all interfaces
+    logger.info(`Attempting to start server on port ${port}...`);
     this.app.listen(port, host, () => {
       logger.info(`Server started on port ${port}`, {
         port,
@@ -429,6 +434,7 @@ export class App {
       });
 
       // Start workers AFTER server is listening
+      logger.info('Server is ready, starting workers...');
       this.startWorkers();
     });
   }
