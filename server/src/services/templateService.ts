@@ -66,6 +66,12 @@ interface MetaErrorResponse {
 /**
  * Convert our component format to Meta's expected format for template creation
  * Supports TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION headers
+ * 
+ * Meta API requires:
+ * - Body example only when body text contains variables ({{1}}, {{2}}, etc.)
+ * - body_text must be array of arrays: [["value1", "value2"]]
+ * - Header text example: { header_text: ["value"] }
+ * - Media header example: { header_handle: ["uploaded_handle"] }
  */
 function toMetaComponents(components: TemplateComponents, headerMediaUrl?: string): unknown[] {
     const metaComponents: unknown[] = [];
@@ -80,7 +86,11 @@ function toMetaComponents(components: TemplateComponents, headerMediaUrl?: strin
             case 'TEXT':
                 if ('text' in components.header) {
                     headerComponent.text = components.header.text;
-                    if (components.header.example) {
+                    // Only include example if header text has variables
+                    if (components.header.example && 
+                        'header_text' in components.header.example && 
+                        Array.isArray(components.header.example.header_text) &&
+                        components.header.example.header_text.length > 0) {
                         headerComponent.example = components.header.example;
                     }
                 }
@@ -103,11 +113,30 @@ function toMetaComponents(components: TemplateComponents, headerMediaUrl?: strin
         metaComponents.push(headerComponent);
     }
 
-    metaComponents.push({
+    // Build body component - only include example if body has variables
+    const bodyComponent: Record<string, unknown> = {
         type: 'BODY',
         text: components.body.text,
-        example: components.body.example,
-    });
+    };
+    
+    // Check if body text contains variables ({{1}}, {{2}}, etc. or {{name}})
+    const hasVariables = /\{\{[^}]+\}\}/.test(components.body.text);
+    
+    if (hasVariables && components.body.example?.body_text) {
+        // Ensure body_text is in the correct format: [["val1", "val2"]]
+        const bodyText = components.body.example.body_text;
+        if (Array.isArray(bodyText) && bodyText.length > 0) {
+            // If it's already nested array, use it; otherwise wrap it
+            if (Array.isArray(bodyText[0])) {
+                bodyComponent.example = { body_text: bodyText };
+            } else {
+                // Wrap single array in outer array: ["val1"] -> [["val1"]]
+                bodyComponent.example = { body_text: [bodyText] };
+            }
+        }
+    }
+    
+    metaComponents.push(bodyComponent);
 
     if (components.footer) {
         metaComponents.push({
@@ -476,6 +505,20 @@ export async function submitTemplateToMeta(templateId: string): Promise<Template
     // Submit to Meta Graph API (include media URL for media headers)
     const metaComponents = toMetaComponents(template.components, template.header_media_url);
 
+    const requestPayload = {
+        name: template.name,
+        category: template.category,
+        language: template.language,
+        components: metaComponents,
+    };
+
+    // Log the payload being sent to Meta for debugging
+    logger.info('Meta template submission payload', {
+        correlationId,
+        templateId,
+        payload: JSON.stringify(requestPayload, null, 2),
+    });
+
     const response = await fetch(
         `${platformsConfig.whatsappBaseUrl}/${phoneNumber.waba_id}/message_templates`,
         {
@@ -484,12 +527,7 @@ export async function submitTemplateToMeta(templateId: string): Promise<Template
                 'Authorization': `Bearer ${phoneNumber.access_token}`,
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-                name: template.name,
-                category: template.category,
-                language: template.language,
-                components: metaComponents,
-            }),
+            body: JSON.stringify(requestPayload),
         }
     );
 
@@ -501,6 +539,10 @@ export async function submitTemplateToMeta(templateId: string): Promise<Template
             correlationId,
             templateId,
             error: errorData.error,
+            errorCode: errorData.error?.code,
+            errorSubcode: errorData.error?.error_subcode,
+            fbtrace: errorData.error?.fbtrace_id,
+            requestPayload: JSON.stringify(requestPayload),
         });
         throw new Error(`Meta API error: ${errorData.error?.message || 'Unknown error'}`);
     }
