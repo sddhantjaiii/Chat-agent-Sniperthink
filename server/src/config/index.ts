@@ -79,7 +79,7 @@ const configSchema = Joi.object({
         name: Joi.string().default('multi-channel-ai-agent'),
         version: Joi.string().default('1.0.0'),
         env: Joi.string().valid('development', 'production', 'test').default('development'),
-        port: Joi.number().port().default(3000),
+        port: Joi.number().port().default(4000),
         logLevel: Joi.string().valid('error', 'warn', 'info', 'debug').default('info'),
         logFormat: Joi.string().valid('json', 'simple').default('json'),
         correlationIdHeader: Joi.string().default('x-correlation-id'),
@@ -107,7 +107,7 @@ const configSchema = Joi.object({
 
     webhook: Joi.object({
         secret: Joi.string().min(10).required(),
-        port: Joi.number().port().default(3000),
+        port: Joi.number().port().default(4000),
         path: Joi.string().default('/webhook/meta'),
     }).required(),
 
@@ -160,7 +160,7 @@ function loadConfig(): AppConfig {
             name: process.env['APP_NAME'],
             version: process.env['APP_VERSION'],
             env: process.env['NODE_ENV'],
-            port: parseInt(process.env['PORT'] || '3000', 10),
+            port: parseInt(process.env['PORT'] || '4000', 10),
             logLevel: process.env['LOG_LEVEL'],
             logFormat: process.env['LOG_FORMAT'],
             correlationIdHeader: process.env['CORRELATION_ID_HEADER'],

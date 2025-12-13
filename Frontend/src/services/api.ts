@@ -134,6 +134,16 @@ export interface UserWithDetails extends User {
   remainingCredits: number
 }
 
+export interface CreateUserData {
+  user_id: string
+  email: string
+  initial_credits?: number
+}
+
+export interface UpdateUserData {
+  email?: string
+}
+
 export const usersApi = {
   list: async (params?: { limit?: number; offset?: number }) => {
     const response = await api.get<PaginatedResponse<User>>('/admin/users', { params })
@@ -145,8 +155,37 @@ export const usersApi = {
     return response.data.data
   },
 
+  create: async (data: CreateUserData) => {
+    const response = await api.post<SingleResponse<{ user: User; initial_credits: number }>>('/admin/users', data)
+    return response.data.data
+  },
+
+  update: async (userId: string, data: UpdateUserData) => {
+    const response = await api.patch<SingleResponse<User>>(`/admin/users/${userId}`, data)
+    return response.data.data
+  },
+
   delete: async (userId: string) => {
     await api.delete(`/admin/users/${userId}`)
+  },
+
+  addCredits: async (userId: string, amount: number) => {
+    const response = await api.post<SingleResponse<{ remaining_credits: number; added: number }>>(`/admin/users/${userId}/credits`, { amount })
+    return response.data.data
+  },
+
+  addPhoneNumber: async (userId: string, data: CreatePhoneNumberData) => {
+    const response = await api.post<SingleResponse<PhoneNumber>>(`/admin/users/${userId}/phone-numbers`, data)
+    return response.data.data
+  },
+
+  deletePhoneNumber: async (userId: string, phoneNumberId: string) => {
+    await api.delete(`/admin/users/${userId}/phone-numbers/${phoneNumberId}`)
+  },
+
+  createAgent: async (userId: string, data: CreateAgentData) => {
+    const response = await api.post<SingleResponse<Agent>>(`/admin/users/${userId}/agents`, data)
+    return response.data.data
   },
 }
 
@@ -169,6 +208,14 @@ export interface PhoneNumber {
   created_at: string
   updated_at: string
   user_email?: string
+}
+
+export interface CreatePhoneNumberData {
+  platform: 'whatsapp' | 'instagram' | 'webchat'
+  meta_phone_number_id: string
+  access_token: string
+  display_name?: string
+  waba_id?: string
 }
 
 export interface RateLimitStats {
@@ -212,6 +259,12 @@ export interface Agent {
   updated_at: string
   user_email?: string
   phone_display_name?: string
+}
+
+export interface CreateAgentData {
+  phone_number_id: string
+  prompt_id: string
+  name: string
 }
 
 export const agentsApi = {
@@ -364,6 +417,16 @@ export const templatesApi = {
     const response = await api.post<SingleResponse<Template>>(
       `/admin/templates/${templateId}/submit`
     )
+    return response.data.data
+  },
+
+  sync: async (data: { userId: string; phoneNumberId: string }) => {
+    const response = await api.post<SingleResponse<{
+      imported: Template[]
+      updated: Template[]
+      errors: string[]
+      summary: { totalImported: number; totalUpdated: number; totalErrors: number }
+    }>>('/admin/templates/sync', { user_id: data.userId, phone_number_id: data.phoneNumberId })
     return response.data.data
   },
 

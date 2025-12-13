@@ -1,15 +1,33 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { contactsApi, Contact } from '@/services/api'
+import { contactsApi, usersApi, Contact } from '@/services/api'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/ui/use-toast'
-import { Search, Trash2, Upload } from 'lucide-react'
+import { Search, Trash2, Plus, X } from 'lucide-react'
+
+interface CreateContactForm {
+  userId: string
+  phone: string
+  name: string
+  email: string
+  company: string
+  tags: string
+}
 
 export default function ContactsPage() {
   const [search, setSearch] = useState('')
   const [page, _setPage] = useState(0)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [formData, setFormData] = useState<CreateContactForm>({
+    userId: '',
+    phone: '',
+    name: '',
+    email: '',
+    company: '',
+    tags: '',
+  })
   const limit = 20
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -17,6 +35,25 @@ export default function ContactsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['contacts', page],
     queryFn: () => contactsApi.list({ limit, offset: page * limit }),
+  })
+
+  const { data: usersData } = useQuery({
+    queryKey: ['users-list'],
+    queryFn: () => usersApi.list({ limit: 100 }),
+  })
+
+  const createMutation = useMutation({
+    mutationFn: (data: { userId: string; contacts: Array<{ phone: string; name?: string; email?: string; company?: string }>; defaultTags?: string[] }) => 
+      contactsApi.import(data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['contacts'] })
+      toast({ title: `Contact created successfully`, description: `Imported: ${result.imported}, Skipped: ${result.skipped}` })
+      setShowCreateForm(false)
+      setFormData({ userId: '', phone: '', name: '', email: '', company: '', tags: '' })
+    },
+    onError: (error: any) => {
+      toast({ variant: 'destructive', title: 'Failed to create contact', description: error?.response?.data?.message })
+    },
   })
 
   const deleteMutation = useMutation({
@@ -29,6 +66,24 @@ export default function ContactsPage() {
       toast({ variant: 'destructive', title: 'Failed to delete contact' })
     },
   })
+
+  const handleCreateSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!formData.userId || !formData.phone) {
+      toast({ variant: 'destructive', title: 'User and Phone are required' })
+      return
+    }
+    createMutation.mutate({
+      userId: formData.userId,
+      contacts: [{
+        phone: formData.phone,
+        name: formData.name || undefined,
+        email: formData.email || undefined,
+        company: formData.company || undefined,
+      }],
+      defaultTags: formData.tags ? formData.tags.split(',').map(t => t.trim()) : undefined,
+    })
+  }
 
   const filteredData = data?.data.filter(
     (contact) =>
@@ -44,11 +99,98 @@ export default function ContactsPage() {
           <h2 className="text-3xl font-bold tracking-tight">Contacts</h2>
           <p className="text-muted-foreground">Manage contacts for campaigns</p>
         </div>
-        <Button variant="outline">
-          <Upload className="h-4 w-4 mr-2" />
-          Import CSV
+        <Button onClick={() => setShowCreateForm(true)}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add Contact
         </Button>
       </div>
+
+      {/* Create Contact Form */}
+      {showCreateForm && (
+        <Card className="border-primary">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle>Add New Contact</CardTitle>
+              <CardDescription>Add a contact to a user's contact list</CardDescription>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setShowCreateForm(false)}>
+              <X className="h-4 w-4" />
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleCreateSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium mb-1 block">User *</label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border"
+                    value={formData.userId}
+                    onChange={(e) => setFormData({ ...formData, userId: e.target.value })}
+                    required
+                  >
+                    <option value="">Select user</option>
+                    {usersData?.data.map((user) => (
+                      <option key={user.user_id} value={user.user_id}>
+                        {user.email} ({user.user_id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Phone Number *</label>
+                  <Input
+                    placeholder="+14155551234 (E.164 format)"
+                    value={formData.phone}
+                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Name</label>
+                  <Input
+                    placeholder="John Doe"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Email</label>
+                  <Input
+                    type="email"
+                    placeholder="john@example.com"
+                    value={formData.email}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Company</label>
+                  <Input
+                    placeholder="Acme Corp"
+                    value={formData.company}
+                    onChange={(e) => setFormData({ ...formData, company: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Tags (comma-separated)</label>
+                  <Input
+                    placeholder="vip, customer, lead"
+                    value={formData.tags}
+                    onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button type="submit" disabled={createMutation.isPending}>
+                  {createMutation.isPending ? 'Creating...' : 'Add Contact'}
+                </Button>
+                <Button type="button" variant="outline" onClick={() => setShowCreateForm(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

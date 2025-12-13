@@ -263,7 +263,7 @@ Contact management with auto-sync from extractions and E.164 phone format.
 ---
 
 ### `templates`
-WhatsApp message templates with Meta approval tracking.
+WhatsApp message templates with Meta approval tracking and media header support.
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -275,6 +275,14 @@ WhatsApp message templates with Meta approval tracking.
 | `status` | VARCHAR(20) | NOT NULL, DEFAULT 'DRAFT', CHECK IN ('DRAFT', 'PENDING', 'APPROVED', 'REJECTED', 'PAUSED', 'DISABLED') |
 | `language` | VARCHAR(10) | NOT NULL, DEFAULT 'en' |
 | `components` | JSONB | NOT NULL, DEFAULT '{}' |
+| `header_type` | VARCHAR(20) | DEFAULT 'NONE', CHECK IN ('NONE', 'TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'LOCATION') |
+| `header_media_url` | TEXT | Public URL for IMAGE/VIDEO/DOCUMENT headers |
+| `header_document_filename` | VARCHAR(255) | Filename for DOCUMENT headers |
+| `header_location_latitude` | DECIMAL(10,8) | For LOCATION headers |
+| `header_location_longitude` | DECIMAL(11,8) | For LOCATION headers |
+| `header_location_name` | VARCHAR(255) | Location name for LOCATION headers |
+| `header_location_address` | TEXT | Location address for LOCATION headers |
+| `waba_id` | VARCHAR(100) | WhatsApp Business Account ID |
 | `meta_template_id` | VARCHAR(100) | Meta's template ID after submission |
 | `rejection_reason` | TEXT | |
 | `submitted_at` | TIMESTAMP | |
@@ -285,6 +293,13 @@ WhatsApp message templates with Meta approval tracking.
 **Unique**: `(phone_number_id, name)`
 
 **Components structure**: `{ header?: {...}, body: {...}, footer?: {...}, buttons?: [...] }`
+
+**Header Types**:
+- `TEXT`: Text header with variables (max 60 chars)
+- `IMAGE`: Image header (JPG, PNG - 5MB max, Meta uploads)
+- `VIDEO`: Video header (MP4 - 16MB max)
+- `DOCUMENT`: Document header (PDF - 100MB max)
+- `LOCATION`: Location header (sent at runtime with lat/long)
 
 ---
 
@@ -330,6 +345,57 @@ Tracks individual template message sends with delivery status.
 | `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
 
 **Variable values structure**: `{ "1": "John", "2": "Acme Corp" }`
+
+---
+
+### `template_buttons`
+Defines buttons for WhatsApp templates with tracking configuration.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `button_id` | VARCHAR(50) | PRIMARY KEY |
+| `template_id` | VARCHAR(50) | FK → templates, NOT NULL |
+| `button_type` | VARCHAR(20) | NOT NULL, CHECK IN ('QUICK_REPLY', 'URL', 'PHONE_NUMBER', 'COPY_CODE') |
+| `button_text` | VARCHAR(100) | NOT NULL |
+| `button_index` | INTEGER | NOT NULL (0, 1, 2...) |
+| `button_url` | TEXT | For URL buttons |
+| `button_url_suffix_variable` | INTEGER | Position of variable for dynamic URL suffix |
+| `button_phone` | VARCHAR(30) | For PHONE_NUMBER buttons |
+| `copy_code_example` | VARCHAR(15) | For COPY_CODE buttons |
+| `tracking_id` | VARCHAR(100) | Custom ID for tracking (e.g., "pricing_cta") |
+| `total_clicks` | INTEGER | DEFAULT 0 |
+| `unique_clicks` | INTEGER | DEFAULT 0 |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Unique**: `(template_id, button_index)`
+
+---
+
+### `button_clicks`
+Tracks Quick Reply button clicks from WhatsApp templates for lead engagement analytics.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `click_id` | VARCHAR(50) | PRIMARY KEY |
+| `template_id` | VARCHAR(50) | FK → templates, NOT NULL |
+| `template_send_id` | VARCHAR(50) | FK → template_sends, NULL |
+| `button_id` | VARCHAR(100) | NOT NULL (e.g., "pricing_btn") |
+| `button_text` | VARCHAR(100) | NOT NULL (display text) |
+| `button_index` | INTEGER | Button position |
+| `button_payload` | TEXT | Full payload from WhatsApp |
+| `customer_phone` | VARCHAR(50) | NOT NULL |
+| `contact_id` | VARCHAR(50) | FK → contacts, NULL |
+| `conversation_id` | VARCHAR(50) | FK → conversations, NULL |
+| `waba_id` | VARCHAR(100) | |
+| `phone_number_id` | VARCHAR(50) | FK → phone_numbers, NULL |
+| `user_id` | VARCHAR(50) | FK → users, NOT NULL |
+| `message_id` | VARCHAR(100) | WhatsApp message ID containing button |
+| `original_message_id` | VARCHAR(100) | ID of original template message sent |
+| `clicked_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
+
+**Indexes**: `template_id`, `customer_phone`, `(template_id, button_id)`, `clicked_at`, `user_id`
 
 ---
 

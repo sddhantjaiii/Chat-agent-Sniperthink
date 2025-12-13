@@ -488,10 +488,11 @@ export async function updateMessagingStats(
 
 /**
  * Get contacts for campaign recipients
+ * Supports both tag-based and contactIds-based filtering
  */
 export async function getContactsForCampaign(
     userId: string,
-    filter: ContactFilter
+    filter: ContactFilter & { contactIds?: string[] }
 ): Promise<Contact[]> {
     const conditions: string[] = [
         'user_id = $1',
@@ -500,6 +501,13 @@ export async function getContactsForCampaign(
     ];
     const params: unknown[] = [userId];
     let paramIndex = 2;
+
+    // If contactIds are specified, use them directly
+    if (filter.contactIds && filter.contactIds.length > 0) {
+        conditions.push(`contact_id = ANY($${paramIndex})`);
+        params.push(filter.contactIds);
+        paramIndex++;
+    }
 
     if (filter.tags && filter.tags.length > 0) {
         conditions.push(`tags && $${paramIndex}`);
@@ -521,12 +529,27 @@ export async function getContactsForCampaign(
     return result.rows;
 }
 
+/**
+ * Get contacts by their IDs
+ */
+export async function getContactsByIds(contactIds: string[]): Promise<Contact[]> {
+    if (contactIds.length === 0) return [];
+    
+    const result = await db.query<Contact>(
+        'SELECT * FROM contacts WHERE contact_id = ANY($1)',
+        [contactIds]
+    );
+    
+    return result.rows;
+}
+
 export const contactService = {
     createContact,
     syncFromExtraction,
     getContactById,
     getContactByPhone,
     getContactsByUserId,
+    getContactsByIds,
     getAllContacts,
     updateContact,
     deleteContact,

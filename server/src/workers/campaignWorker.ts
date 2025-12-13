@@ -484,14 +484,21 @@ async function workerLoop(): Promise<void> {
             limit: 100,
         });
 
+        if (campaigns.length > 0) {
+            logger.info('Found running campaigns to process', { count: campaigns.length });
+        }
+
         // Process each running campaign
         for (const campaign of campaigns) {
             if (isShuttingDown) break;
             await processCampaignBatch(campaign);
         }
 
-        // Reset daily rate limits at midnight UTC
-        await rateLimitService.resetAllDaily();
+        // Reset daily rate limits at midnight UTC (only resets if needed)
+        const now = new Date();
+        if (now.getUTCHours() === 0 && now.getUTCMinutes() < 1) {
+            await rateLimitService.resetAllDaily();
+        }
     } catch (error) {
         logger.error('Campaign worker error', {
             error: error instanceof Error ? error.message : 'Unknown error',

@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { templatesApi, Template } from '@/services/api'
+import { templatesApi, Template, phoneNumbersApi, PhoneNumber } from '@/services/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/ui/use-toast'
-import { Search, Plus, Trash2, Send, Eye } from 'lucide-react'
+import { Search, Plus, Trash2, Send, Eye, RefreshCw, X } from 'lucide-react'
 
 const statusColors: Record<string, string> = {
   DRAFT: 'bg-gray-100 text-gray-800',
@@ -20,6 +20,8 @@ const statusColors: Record<string, string> = {
 export default function TemplatesPage() {
   const [search, setSearch] = useState('')
   const [page, _setPage] = useState(0)
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false)
+  const [selectedPhoneNumber, setSelectedPhoneNumber] = useState<string>('')
   const limit = 20
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -51,6 +53,36 @@ export default function TemplatesPage() {
     },
   })
 
+  // Fetch phone numbers for sync
+  const { data: phoneNumbersData } = useQuery({
+    queryKey: ['phoneNumbers'],
+    queryFn: () => phoneNumbersApi.list({ limit: 100 }),
+  })
+
+  const syncMutation = useMutation({
+    mutationFn: (data: { userId: string; phoneNumberId: string }) => templatesApi.sync(data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['templates'] })
+      setSyncDialogOpen(false)
+      setSelectedPhoneNumber('')
+      toast({
+        title: 'Templates synced from Meta',
+        description: `Imported: ${result.summary.totalImported}, Updated: ${result.summary.totalUpdated}${result.summary.totalErrors > 0 ? `, Errors: ${result.summary.totalErrors}` : ''}`,
+      })
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to sync templates',
+        description: error.message,
+      })
+    },
+  })
+
+  const whatsappPhoneNumbers = phoneNumbersData?.data.filter(
+    (pn: PhoneNumber) => pn.platform === 'whatsapp'
+  ) || []
+
   const filteredData = data?.data.filter(
     (template) =>
       template.name.toLowerCase().includes(search.toLowerCase())
@@ -58,17 +90,81 @@ export default function TemplatesPage() {
 
   return (
     <div className="space-y-6">
+      {/* Sync Modal */}
+      {syncDialogOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <Card className="w-full max-w-md mx-4">
+            <CardHeader className="flex flex-row items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold">Sync Templates from Meta</h3>
+                <p className="text-sm text-muted-foreground">
+                  Import existing approved templates from your WhatsApp Business Account.
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => setSyncDialogOpen(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Select Phone Number</label>
+                <select
+                  value={selectedPhoneNumber}
+                  onChange={(e) => setSelectedPhoneNumber(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-md bg-background text-foreground"
+                >
+                  <option value="">Choose a phone number...</option>
+                  {whatsappPhoneNumbers.map((pn: PhoneNumber) => (
+                    <option key={pn.id} value={pn.id}>
+                      {pn.display_name || pn.meta_phone_number_id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                className="w-full"
+                disabled={!selectedPhoneNumber || syncMutation.isPending}
+                onClick={() => {
+                  const pn = whatsappPhoneNumbers.find((p: PhoneNumber) => p.id === selectedPhoneNumber)
+                  if (pn) {
+                    syncMutation.mutate({ userId: pn.user_id, phoneNumberId: pn.id })
+                  }
+                }}
+              >
+                {syncMutation.isPending ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    Syncing...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Sync Templates
+                  </>
+                )}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Templates</h2>
           <p className="text-muted-foreground">Manage WhatsApp message templates</p>
         </div>
-        <Link to="/templates/new">
-          <Button>
-            <Plus className="h-4 w-4 mr-2" />
-            Create Template
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setSyncDialogOpen(true)}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Sync from Meta
           </Button>
-        </Link>
+          <Link to="/templates/new">
+            <Button>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Template
+            </Button>
+          </Link>
+        </div>
       </div>
 
       <Card>

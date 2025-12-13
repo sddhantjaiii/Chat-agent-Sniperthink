@@ -130,6 +130,9 @@ export class App {
     // Import admin controller and middleware
     const { adminController } = require('./controllers/adminController');
     const { adminAuthMiddleware, adminLoginHandler, refreshAdminToken } = require('./middleware/adminAuth');
+    
+    // Import external API controller
+    const { externalApiController } = require('./controllers/externalApiController');
 
     // Import controllers
     const { UsersController } = require('./controllers/users');
@@ -137,6 +140,7 @@ export class App {
     const { MessagesController } = require('./controllers/messages');
     const { ExtractionsController } = require('./controllers/extractions');
     const { WebchatController } = require('./controllers/webchat');
+    const { leadsController } = require('./controllers/leads');
     const cacheController = require('./controllers/cache');
 
     // Initialize controllers
@@ -216,6 +220,12 @@ export class App {
     this.app.get('/users/:user_id/conversations/:conversation_id/extraction', extractionsController.getConversationExtraction);
     this.app.post('/users/:user_id/conversations/:conversation_id/extract', extractionsController.triggerExtraction);
 
+    // Leads routes (unified lead management)
+    this.app.get('/users/:user_id/leads', leadsController.getLeads);
+    this.app.get('/users/:user_id/leads/stats', leadsController.getLeadStats);
+    this.app.get('/users/:user_id/leads/:customer_phone', leadsController.getLead);
+    this.app.get('/users/:user_id/leads/:customer_phone/messages', leadsController.getLeadMessages);
+
     // Webchat routes
     this.app.post('/api/users/:user_id/webchat/channels', webchatController.createChannel);
     this.app.get('/api/webchat/:webchat_id/embed', webchatController.getEmbedCode);
@@ -288,8 +298,14 @@ export class App {
     this.app.get('/admin/templates', adminController.listTemplates);
     this.app.get('/admin/templates/:templateId', adminController.getTemplate);
     this.app.post('/admin/templates', adminController.createTemplate);
+    this.app.post('/admin/templates/sync', adminController.syncTemplates);
     this.app.post('/admin/templates/:templateId/submit', adminController.submitTemplate);
     this.app.delete('/admin/templates/:templateId', adminController.deleteTemplate);
+    this.app.get('/admin/templates/:templateId/button-clicks', adminController.getTemplateButtonClicks);
+
+    // Button Click Analytics
+    this.app.get('/admin/button-clicks', adminController.listButtonClicks);
+    this.app.get('/admin/leads/:customerPhone/button-activity', adminController.getLeadButtonActivity);
 
     // Contacts management
     this.app.get('/admin/contacts', adminController.listContacts);
@@ -305,6 +321,32 @@ export class App {
     this.app.post('/admin/campaigns/:campaignId/resume', adminController.resumeCampaign);
     this.app.post('/admin/campaigns/:campaignId/cancel', adminController.cancelCampaign);
     this.app.delete('/admin/campaigns/:campaignId', adminController.deleteCampaign);
+
+    // ===================================================
+    // External API Routes (NO AUTHENTICATION)
+    // For Dashboard to communicate with WhatsApp service
+    // ===================================================
+    
+    // Phone Numbers
+    this.app.get('/api/v1/phone-numbers', externalApiController.listPhoneNumbers);
+    
+    // Templates - Full CRUD
+    this.app.get('/api/v1/templates', externalApiController.listTemplates);
+    this.app.get('/api/v1/templates/:templateId', externalApiController.getTemplate);
+    this.app.post('/api/v1/templates', externalApiController.createTemplate);
+    this.app.post('/api/v1/templates/sync', externalApiController.syncTemplates);
+    this.app.post('/api/v1/templates/:templateId/submit', externalApiController.submitTemplate);
+    this.app.delete('/api/v1/templates/:templateId', externalApiController.deleteTemplate);
+    
+    // Button Click Analytics
+    this.app.get('/api/v1/templates/:templateId/button-clicks', externalApiController.getTemplateButtonClicks);
+    this.app.get('/api/v1/button-clicks', externalApiController.listButtonClicks);
+    this.app.get('/api/v1/leads/:customerPhone/button-activity', externalApiController.getLeadButtonActivity);
+    
+    // Messaging
+    this.app.post('/api/v1/send', externalApiController.sendSingleMessage);
+    this.app.post('/api/v1/campaign', externalApiController.createExternalCampaign);
+    this.app.get('/api/v1/campaign/:campaignId', externalApiController.getCampaignStatus);
 
     // Root endpoint
     this.app.get('/', (_req, res) => {
@@ -400,6 +442,7 @@ export class App {
         const { startOptimizedMessageWorker } = await import('./workers/optimizedMessageWorker');
         const extractionWorkerModule = await import('./workers/extractionWorker');
         const extractionWorker = extractionWorkerModule.default;
+        const { campaignWorker } = await import('./workers/campaignWorker');
 
         // Get worker count from environment
         const workerCount = parseInt(process.env['MIN_WORKERS'] || '5', 10);
@@ -416,9 +459,14 @@ export class App {
         extractionWorker.start();
         logger.info('Extraction worker started successfully');
 
+        // Start campaign worker
+        campaignWorker.start();
+        logger.info('Campaign worker started successfully');
+
         logger.info('All background workers started', {
           messageWorkers: workerCount,
-          extractionWorker: 'running'
+          extractionWorker: 'running',
+          campaignWorker: 'running'
         });
       } catch (error) {
         logger.error('Failed to start workers', { error: (error as Error).message });

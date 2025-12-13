@@ -18,6 +18,16 @@ import type {
     TemplateComponents,
     TemplateStatus,
     PhoneNumberWithRateLimit,
+    TemplateHeaderFormat,
+    TemplateButtonDefinition,
+    ButtonClick,
+    CreateButtonClickData,
+    ButtonClickAnalytics,
+    LeadButtonActivity,
+    TemplateLocationData,
+    TemplateUrlButton,
+    TemplatePhoneButton,
+    TemplateCopyCodeButton,
 } from '../models/types';
 
 // Meta Graph API response types
@@ -54,18 +64,43 @@ interface MetaErrorResponse {
 }
 
 /**
- * Convert our component format to Meta's expected format
+ * Convert our component format to Meta's expected format for template creation
+ * Supports TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION headers
  */
-function toMetaComponents(components: TemplateComponents): unknown[] {
+function toMetaComponents(components: TemplateComponents, headerMediaUrl?: string): unknown[] {
     const metaComponents: unknown[] = [];
 
     if (components.header) {
-        metaComponents.push({
+        const headerComponent: Record<string, unknown> = {
             type: 'HEADER',
             format: components.header.format,
-            text: components.header.text,
-            example: components.header.example,
-        });
+        };
+
+        switch (components.header.format) {
+            case 'TEXT':
+                if ('text' in components.header) {
+                    headerComponent.text = components.header.text;
+                    if (components.header.example) {
+                        headerComponent.example = components.header.example;
+                    }
+                }
+                break;
+            case 'IMAGE':
+            case 'VIDEO':
+            case 'DOCUMENT':
+                // For media headers, provide example handle/URL
+                if (headerMediaUrl) {
+                    headerComponent.example = { header_handle: [headerMediaUrl] };
+                } else if ('example' in components.header && components.header.example) {
+                    headerComponent.example = components.header.example;
+                }
+                break;
+            case 'LOCATION':
+                // Location headers don't need example data for template creation
+                break;
+        }
+
+        metaComponents.push(headerComponent);
     }
 
     metaComponents.push({
@@ -87,13 +122,27 @@ function toMetaComponents(components: TemplateComponents): unknown[] {
             buttons: components.buttons.buttons.map(btn => {
                 const button: Record<string, unknown> = {
                     type: btn.type,
-                    text: btn.text,
                 };
-                if (btn.type === 'URL' && btn.url) {
-                    button.url = btn.url;
-                }
-                if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
-                    button.phone_number = btn.phone_number;
+                
+                // Handle different button types
+                switch (btn.type) {
+                    case 'QUICK_REPLY':
+                        button.text = btn.text;
+                        break;
+                    case 'URL':
+                        button.text = btn.text;
+                        button.url = (btn as TemplateUrlButton).url;
+                        if ((btn as TemplateUrlButton).example) {
+                            button.example = (btn as TemplateUrlButton).example;
+                        }
+                        break;
+                    case 'PHONE_NUMBER':
+                        button.text = btn.text;
+                        button.phone_number = (btn as TemplatePhoneButton).phone_number;
+                        break;
+                    case 'COPY_CODE':
+                        button.example = (btn as TemplateCopyCodeButton).example;
+                        break;
                 }
                 return button;
             }),
@@ -105,6 +154,7 @@ function toMetaComponents(components: TemplateComponents): unknown[] {
 
 /**
  * Validate template components
+ * Supports all header formats: TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION
  */
 export function validateTemplateComponents(components: TemplateComponents): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
@@ -119,13 +169,22 @@ export function validateTemplateComponents(components: TemplateComponents): { va
         }
     }
 
-    // Header validation (optional, text only for now)
+    // Header validation (optional)
     if (components.header) {
-        if (components.header.format !== 'TEXT') {
-            errors.push('Only TEXT headers are supported currently');
-        }
-        if (components.header.text && components.header.text.length > 60) {
-            errors.push('Header text must be 60 characters or less');
+        switch (components.header.format) {
+            case 'TEXT':
+                if ('text' in components.header && components.header.text && components.header.text.length > 60) {
+                    errors.push('Header text must be 60 characters or less');
+                }
+                break;
+            case 'IMAGE':
+            case 'VIDEO':
+            case 'DOCUMENT':
+            case 'LOCATION':
+                // Media headers are validated by Meta, no local validation needed
+                break;
+            default:
+                errors.push(`Unsupported header format: ${(components.header as { format: string }).format}`);
         }
     }
 
@@ -136,20 +195,60 @@ export function validateTemplateComponents(components: TemplateComponents): { va
         }
     }
 
-    // Buttons validation (max 3)
+    // Buttons validation
     if (components.buttons) {
-        if (components.buttons.buttons.length > 3) {
-            errors.push('Maximum 3 buttons allowed');
+        const buttons = components.buttons.buttons;
+        
+        // Max 10 quick reply OR max 2 CTA buttons
+        const quickReplyCount = buttons.filter(b => b.type === 'QUICK_REPLY').length;
+        const ctaCount = buttons.filter(b => ['URL', 'PHONE_NUMBER'].includes(b.type)).length;
+        const copyCodeCount = buttons.filter(b => b.type === 'COPY_CODE').length;
+
+        if (quickReplyCount > 0 && ctaCount > 0) {
+            // Can't mix quick reply with CTA buttons
+            errors.push('Cannot mix Quick Reply buttons with URL/Phone buttons');
         }
-        for (const btn of components.buttons.buttons) {
-            if (!btn.text || btn.text.length > 25) {
-                errors.push('Button text is required and must be 25 characters or less');
-            }
-            if (btn.type === 'URL' && !btn.url) {
-                errors.push('URL button requires a URL');
-            }
-            if (btn.type === 'PHONE_NUMBER' && !btn.phone_number) {
-                errors.push('Phone button requires a phone number');
+
+        if (quickReplyCount > 10) {
+            errors.push('Maximum 10 Quick Reply buttons allowed');
+        }
+
+        if (ctaCount > 2) {
+            errors.push('Maximum 2 Call-to-Action buttons allowed');
+        }
+
+        if (copyCodeCount > 1) {
+            errors.push('Maximum 1 Copy Code button allowed');
+        }
+
+        for (const btn of buttons) {
+            switch (btn.type) {
+                case 'QUICK_REPLY':
+                    if (!btn.text || btn.text.length > 25) {
+                        errors.push('Quick Reply button text is required and must be 25 characters or less');
+                    }
+                    break;
+                case 'URL':
+                    if (!btn.text || btn.text.length > 25) {
+                        errors.push('URL button text is required and must be 25 characters or less');
+                    }
+                    if (!(btn as TemplateUrlButton).url) {
+                        errors.push('URL button requires a URL');
+                    }
+                    break;
+                case 'PHONE_NUMBER':
+                    if (!btn.text || btn.text.length > 25) {
+                        errors.push('Phone button text is required and must be 25 characters or less');
+                    }
+                    if (!(btn as TemplatePhoneButton).phone_number) {
+                        errors.push('Phone button requires a phone number');
+                    }
+                    break;
+                case 'COPY_CODE':
+                    if (!(btn as TemplateCopyCodeButton).example || (btn as TemplateCopyCodeButton).example.length > 15) {
+                        errors.push('Copy Code button requires an example code (max 15 characters)');
+                    }
+                    break;
             }
         }
     }
@@ -159,6 +258,7 @@ export function validateTemplateComponents(components: TemplateComponents): { va
 
 /**
  * Create a new template (draft)
+ * Supports all header types: TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION
  */
 export async function createTemplate(data: CreateTemplateData): Promise<Template> {
     const correlationId = uuidv4();
@@ -170,11 +270,19 @@ export async function createTemplate(data: CreateTemplateData): Promise<Template
         throw new Error(`Invalid template components: ${validation.errors.join(', ')}`);
     }
 
+    // Determine header type from components
+    const headerType = data.header_type || 
+        (data.components.header?.format as TemplateHeaderFormat) || 
+        'NONE';
+
     const result = await db.query<Template>(
         `INSERT INTO templates (
             template_id, user_id, phone_number_id, name, category, 
-            language, components, status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT')
+            language, components, status,
+            header_type, header_media_url, header_document_filename,
+            header_location_latitude, header_location_longitude,
+            header_location_name, header_location_address, waba_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING *`,
         [
             data.template_id,
@@ -184,11 +292,26 @@ export async function createTemplate(data: CreateTemplateData): Promise<Template
             data.category,
             data.language || templatesConfig.defaultLanguage,
             JSON.stringify(data.components),
+            headerType,
+            data.header_media_url || null,
+            data.header_document_filename || null,
+            data.header_location_latitude || null,
+            data.header_location_longitude || null,
+            data.header_location_name || null,
+            data.header_location_address || null,
+            data.waba_id || null,
         ]
     );
 
-    logger.info('Template created', { correlationId, templateId: data.template_id });
-    return result.rows[0]!;
+    const template = result.rows[0]!;
+
+    // Auto-create button definitions if buttons exist
+    if (data.components.buttons?.buttons.length) {
+        await createButtonDefinitionsFromTemplate(template.template_id, data.components.buttons.buttons);
+    }
+
+    logger.info('Template created', { correlationId, templateId: data.template_id, headerType });
+    return template;
 }
 
 /**
@@ -313,6 +436,7 @@ export async function deleteTemplate(templateId: string): Promise<boolean> {
 
 /**
  * Submit template to Meta for approval
+ * Supports all header types including media (IMAGE, VIDEO, DOCUMENT) and LOCATION
  */
 export async function submitTemplateToMeta(templateId: string): Promise<Template> {
     const correlationId = uuidv4();
@@ -346,10 +470,11 @@ export async function submitTemplateToMeta(templateId: string): Promise<Template
         templateId,
         templateName: template.name,
         wabaId: phoneNumber.waba_id,
+        headerType: template.header_type,
     });
 
-    // Submit to Meta Graph API
-    const metaComponents = toMetaComponents(template.components);
+    // Submit to Meta Graph API (include media URL for media headers)
+    const metaComponents = toMetaComponents(template.components, template.header_media_url);
 
     const response = await fetch(
         `${platformsConfig.whatsappBaseUrl}/${phoneNumber.waba_id}/message_templates`,
@@ -396,6 +521,270 @@ export async function submitTemplateToMeta(templateId: string): Promise<Template
     });
 
     return updatedTemplate!;
+}
+
+/**
+ * Sync all templates from Meta for a phone number
+ * Imports existing approved templates that aren't in our database
+ */
+export async function syncTemplatesFromMeta(
+    userId: string,
+    phoneNumberId: string
+): Promise<{ imported: Template[]; updated: Template[]; errors: string[] }> {
+    const correlationId = uuidv4();
+    const imported: Template[] = [];
+    const updated: Template[] = [];
+    const errors: string[] = [];
+
+    logger.info('Syncing templates from Meta', { correlationId, userId, phoneNumberId });
+
+    // Get phone number with WABA ID
+    const phoneResult = await db.query<PhoneNumberWithRateLimit>(
+        'SELECT * FROM phone_numbers WHERE id = $1 AND user_id = $2',
+        [phoneNumberId, userId]
+    );
+    const phoneNumber = phoneResult.rows[0];
+
+    if (!phoneNumber?.waba_id) {
+        throw new Error('Phone number not found or missing WABA ID');
+    }
+
+    // Fetch all templates from Meta
+    const response = await fetch(
+        `${platformsConfig.whatsappBaseUrl}/${phoneNumber.waba_id}/message_templates?limit=100`,
+        {
+            headers: {
+                'Authorization': `Bearer ${phoneNumber.access_token}`,
+            },
+        }
+    );
+
+    if (!response.ok) {
+        const errorData = await response.json() as MetaErrorResponse;
+        throw new Error(`Failed to fetch templates from Meta: ${errorData.error?.message || 'Unknown error'}`);
+    }
+
+    const data = await response.json() as MetaTemplateListResponse;
+    
+    logger.info('Fetched templates from Meta', { 
+        correlationId, 
+        count: data.data?.length || 0 
+    });
+
+    // Process each template from Meta
+    for (const metaTemplate of data.data || []) {
+        try {
+            // Check if template already exists in our database
+            const existingResult = await db.query<Template>(
+                `SELECT * FROM templates 
+                 WHERE (meta_template_id = $1 OR (name = $2 AND phone_number_id = $3 AND language = $4))`,
+                [metaTemplate.id, metaTemplate.name, phoneNumberId, metaTemplate.language]
+            );
+            const existing = existingResult.rows[0];
+
+            // Map Meta status to our status
+            const statusMap: Record<string, TemplateStatus> = {
+                APPROVED: 'APPROVED',
+                PENDING: 'PENDING',
+                REJECTED: 'REJECTED',
+                PAUSED: 'PAUSED',
+                DISABLED: 'DISABLED',
+            };
+            const status = statusMap[metaTemplate.status] || 'PENDING';
+
+            // Convert Meta components to our format (now returns headerType too)
+            const { components, headerType } = fromMetaComponents(metaTemplate.components);
+
+            if (existing) {
+                // Update existing template
+                const updatedTemplate = await updateTemplate(existing.template_id, {
+                    status,
+                    meta_template_id: metaTemplate.id,
+                    rejection_reason: metaTemplate.rejected_reason || undefined,
+                    approved_at: status === 'APPROVED' ? new Date() : undefined,
+                    header_type: headerType,
+                    components,
+                });
+                if (updatedTemplate) {
+                    updated.push(updatedTemplate);
+                }
+            } else {
+                // Create new template from Meta
+                const templateId = uuidv4();
+                const result = await db.query<Template>(
+                    `INSERT INTO templates (
+                        template_id, user_id, phone_number_id, name, category, 
+                        status, language, components, meta_template_id,
+                        rejection_reason, submitted_at, approved_at, header_type,
+                        waba_id, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    RETURNING *`,
+                    [
+                        templateId,
+                        userId,
+                        phoneNumberId,
+                        metaTemplate.name,
+                        metaTemplate.category,
+                        status,
+                        metaTemplate.language,
+                        JSON.stringify(components),
+                        metaTemplate.id,
+                        metaTemplate.rejected_reason || null,
+                        new Date(), // submitted_at - it's already on Meta
+                        status === 'APPROVED' ? new Date() : null,
+                        headerType,
+                        phoneNumber.waba_id,
+                    ]
+                );
+                
+                // Auto-create button definitions if buttons exist
+                if (components.buttons?.buttons.length) {
+                    await createButtonDefinitionsFromTemplate(templateId, components.buttons.buttons);
+                }
+                
+                imported.push(result.rows[0]!);
+            }
+        } catch (error) {
+            const errorMsg = `Failed to import template ${metaTemplate.name}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            logger.warn(errorMsg, { correlationId, metaTemplate: metaTemplate.name });
+            errors.push(errorMsg);
+        }
+    }
+
+    logger.info('Template sync completed', { 
+        correlationId, 
+        imported: imported.length, 
+        updated: updated.length,
+        errors: errors.length 
+    });
+
+    return { imported, updated, errors };
+}
+
+/**
+ * Convert Meta components to our internal format
+ * Handles all header types: TEXT, IMAGE, VIDEO, DOCUMENT, LOCATION
+ */
+function fromMetaComponents(metaComponents: unknown[]): { components: TemplateComponents; headerType: TemplateHeaderFormat | 'NONE' } {
+    const components: TemplateComponents = {
+        body: { text: '', type: 'BODY' }
+    };
+    let headerType: TemplateHeaderFormat | 'NONE' = 'NONE';
+
+    for (const comp of metaComponents as Array<{ 
+        type: string; 
+        text?: string; 
+        format?: string; 
+        buttons?: unknown[];
+        example?: { header_handle?: string[]; header_text?: string[] };
+    }>) {
+        switch (comp.type) {
+            case 'HEADER':
+                headerType = (comp.format as TemplateHeaderFormat) || 'TEXT';
+                switch (comp.format) {
+                    case 'TEXT':
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'TEXT',
+                            text: comp.text || '',
+                            example: comp.example?.header_text ? { header_text: comp.example.header_text } : undefined,
+                        };
+                        break;
+                    case 'IMAGE':
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'IMAGE',
+                            example: comp.example?.header_handle ? { header_handle: comp.example.header_handle } : undefined,
+                        };
+                        break;
+                    case 'VIDEO':
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'VIDEO',
+                            example: comp.example?.header_handle ? { header_handle: comp.example.header_handle } : undefined,
+                        };
+                        break;
+                    case 'DOCUMENT':
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'DOCUMENT',
+                            example: comp.example?.header_handle ? { header_handle: comp.example.header_handle } : undefined,
+                        };
+                        break;
+                    case 'LOCATION':
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'LOCATION',
+                        };
+                        break;
+                    default:
+                        // Fallback to TEXT
+                        components.header = {
+                            type: 'HEADER',
+                            format: 'TEXT',
+                            text: comp.text || '',
+                        };
+                }
+                break;
+            case 'BODY':
+                components.body = {
+                    type: 'BODY',
+                    text: comp.text || '',
+                };
+                break;
+            case 'FOOTER':
+                components.footer = {
+                    type: 'FOOTER',
+                    text: comp.text || '',
+                };
+                break;
+            case 'BUTTONS':
+                components.buttons = {
+                    type: 'BUTTONS',
+                    buttons: (comp.buttons as Array<{ 
+                        type: string; 
+                        text?: string; 
+                        url?: string; 
+                        phone_number?: string;
+                        example?: string | string[];
+                    }> || []).map(btn => {
+                        switch (btn.type) {
+                            case 'QUICK_REPLY':
+                                return {
+                                    type: 'QUICK_REPLY' as const,
+                                    text: btn.text || '',
+                                };
+                            case 'URL':
+                                return {
+                                    type: 'URL' as const,
+                                    text: btn.text || '',
+                                    url: btn.url || '',
+                                    example: btn.example ? (Array.isArray(btn.example) ? btn.example : [btn.example]) : undefined,
+                                };
+                            case 'PHONE_NUMBER':
+                                return {
+                                    type: 'PHONE_NUMBER' as const,
+                                    text: btn.text || '',
+                                    phone_number: btn.phone_number || '',
+                                };
+                            case 'COPY_CODE':
+                                return {
+                                    type: 'COPY_CODE' as const,
+                                    example: (typeof btn.example === 'string' ? btn.example : btn.example?.[0]) || '',
+                                };
+                            default:
+                                return {
+                                    type: 'QUICK_REPLY' as const,
+                                    text: btn.text || '',
+                                };
+                        }
+                    }),
+                };
+                break;
+        }
+    }
+
+    return { components, headerType };
 }
 
 /**
@@ -520,13 +909,15 @@ export async function deleteTemplateFromMeta(templateId: string): Promise<boolea
 
 /**
  * Create template variable
+ * Supports both server-side mapping (extraction_field) and client-side mapping
  */
 export async function createTemplateVariable(data: CreateTemplateVariableData): Promise<TemplateVariable> {
     const result = await db.query<TemplateVariable>(
         `INSERT INTO template_variables (
             variable_id, template_id, variable_name, position, 
-            component_type, extraction_field, default_value, sample_value
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            component_type, extraction_field, default_value, sample_value,
+            description, is_required, placeholder
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *`,
         [
             data.variable_id,
@@ -534,9 +925,12 @@ export async function createTemplateVariable(data: CreateTemplateVariableData): 
             data.variable_name,
             data.position,
             data.component_type || 'BODY',
-            data.extraction_field,
+            data.extraction_field || null, // Optional - dashboard can leave empty
             data.default_value,
             data.sample_value,
+            data.description || null,
+            data.is_required || false,
+            data.placeholder || null,
         ]
     );
     return result.rows[0]!;
@@ -565,7 +959,13 @@ export async function deleteTemplateVariable(variableId: string): Promise<boolea
 }
 
 /**
- * Substitute variables with actual values from extraction data
+ * Substitute variables with actual values
+ * 
+ * Supports two modes:
+ * 1. Client-side mapping: Dashboard sends resolved values in manualValues (keyed by position "1", "2" OR variable_name)
+ * 2. Server-side mapping: Uses extraction_field to auto-fill from extractionData
+ * 
+ * Priority: manualValues (by position) > manualValues (by name) > extraction_field > default_value > sample_value
  */
 export async function substituteVariables(
     templateId: string,
@@ -578,17 +978,32 @@ export async function substituteVariables(
     for (const variable of variables) {
         const position = variable.position.toString();
 
-        // Priority: manual value > extraction field > default value
+        // Priority 1: Manual value by position (e.g., { "1": "John" })
+        if (manualValues?.[position]) {
+            result[position] = manualValues[position]!;
+            continue;
+        }
+
+        // Priority 2: Manual value by variable_name (e.g., { "customer_name": "John" })
         if (manualValues?.[variable.variable_name]) {
             result[position] = manualValues[variable.variable_name]!;
-        } else if (variable.extraction_field && extractionData?.[variable.extraction_field]) {
-            result[position] = String(extractionData[variable.extraction_field]);
-        } else if (variable.default_value) {
-            result[position] = variable.default_value;
-        } else {
-            // Use sample value or empty string as fallback
-            result[position] = variable.sample_value || '';
+            continue;
         }
+
+        // Priority 3: Server-side auto-fill from extraction_field
+        if (variable.extraction_field && extractionData?.[variable.extraction_field]) {
+            result[position] = String(extractionData[variable.extraction_field]);
+            continue;
+        }
+
+        // Priority 4: Default value
+        if (variable.default_value) {
+            result[position] = variable.default_value;
+            continue;
+        }
+
+        // Priority 5: Sample value (last resort)
+        result[position] = variable.sample_value || '';
     }
 
     return result;
@@ -723,23 +1138,470 @@ export async function getTemplateAnalytics(templateId: string): Promise<{
     };
 }
 
+// ============================================================
+// Button Definition Functions
+// ============================================================
+
+/**
+ * Create button definitions from template buttons
+ * Called automatically when creating templates or syncing from Meta
+ */
+export async function createButtonDefinitionsFromTemplate(
+    templateId: string, 
+    buttons: Array<{ type: string; text?: string; url?: string; phone_number?: string; example?: string | string[]; tracking_id?: string }>
+): Promise<TemplateButtonDefinition[]> {
+    const definitions: TemplateButtonDefinition[] = [];
+
+    for (let i = 0; i < buttons.length; i++) {
+        const btn = buttons[i]!;
+        const buttonId = uuidv4();
+        
+        const result = await db.query<TemplateButtonDefinition>(
+            `INSERT INTO template_buttons (
+                button_id, template_id, button_type, button_text, button_index,
+                button_url, button_phone, copy_code_example, tracking_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING *`,
+            [
+                buttonId,
+                templateId,
+                btn.type,
+                btn.text || '',
+                i,
+                btn.url || null,
+                btn.phone_number || null,
+                typeof btn.example === 'string' ? btn.example : (btn.example?.[0] || null),
+                btn.tracking_id || `${btn.type.toLowerCase()}_${i}`,
+            ]
+        );
+        
+        definitions.push(result.rows[0]!);
+    }
+
+    return definitions;
+}
+
+/**
+ * Get button definitions for a template
+ */
+export async function getTemplateButtons(templateId: string): Promise<TemplateButtonDefinition[]> {
+    const result = await db.query<TemplateButtonDefinition>(
+        'SELECT * FROM template_buttons WHERE template_id = $1 ORDER BY button_index',
+        [templateId]
+    );
+    return result.rows;
+}
+
+/**
+ * Update button tracking ID
+ */
+export async function updateButtonTrackingId(buttonId: string, trackingId: string): Promise<TemplateButtonDefinition | null> {
+    const result = await db.query<TemplateButtonDefinition>(
+        'UPDATE template_buttons SET tracking_id = $1 WHERE button_id = $2 RETURNING *',
+        [trackingId, buttonId]
+    );
+    return result.rows[0] || null;
+}
+
+// ============================================================
+// Button Click Tracking Functions
+// ============================================================
+
+/**
+ * Record a button click from WhatsApp webhook
+ * Called when we receive an interactive.button_reply message
+ */
+export async function recordButtonClick(data: CreateButtonClickData): Promise<ButtonClick> {
+    const correlationId = uuidv4();
+    logger.info('Recording button click', { 
+        correlationId, 
+        templateId: data.template_id, 
+        buttonId: data.button_id,
+        customerPhone: data.customer_phone 
+    });
+
+    const result = await db.query<ButtonClick>(
+        `INSERT INTO button_clicks (
+            click_id, template_id, template_send_id, button_id, button_text,
+            button_index, button_payload, customer_phone, contact_id,
+            conversation_id, waba_id, phone_number_id, user_id,
+            message_id, original_message_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        RETURNING *`,
+        [
+            data.click_id,
+            data.template_id,
+            data.template_send_id || null,
+            data.button_id,
+            data.button_text,
+            data.button_index || null,
+            data.button_payload || null,
+            data.customer_phone,
+            data.contact_id || null,
+            data.conversation_id || null,
+            data.waba_id || null,
+            data.phone_number_id || null,
+            data.user_id,
+            data.message_id || null,
+            data.original_message_id || null,
+        ]
+    );
+
+    // Update button click counts
+    await db.query(
+        `UPDATE template_buttons 
+         SET total_clicks = total_clicks + 1 
+         WHERE template_id = $1 AND button_text = $2`,
+        [data.template_id, data.button_text]
+    );
+
+    // Update unique clicks (check if this lead clicked before)
+    const existingClick = await db.query(
+        `SELECT 1 FROM button_clicks 
+         WHERE template_id = $1 AND button_text = $2 AND customer_phone = $3 
+         AND click_id != $4`,
+        [data.template_id, data.button_text, data.customer_phone, data.click_id]
+    );
+
+    if (existingClick.rowCount === 0) {
+        await db.query(
+            `UPDATE template_buttons 
+             SET unique_clicks = unique_clicks + 1 
+             WHERE template_id = $1 AND button_text = $2`,
+            [data.template_id, data.button_text]
+        );
+    }
+
+    logger.info('Button click recorded', { correlationId, clickId: data.click_id });
+    return result.rows[0]!;
+}
+
+/**
+ * Get button click analytics for a template
+ */
+export async function getButtonClickAnalytics(templateId: string): Promise<ButtonClickAnalytics[]> {
+    const result = await db.query<ButtonClickAnalytics & { template_name: string }>(
+        `SELECT 
+            bc.template_id,
+            t.name as template_name,
+            bc.button_id,
+            bc.button_text,
+            COUNT(*) as total_clicks,
+            COUNT(DISTINCT bc.customer_phone) as unique_leads
+        FROM button_clicks bc
+        JOIN templates t ON t.template_id = bc.template_id
+        WHERE bc.template_id = $1
+        GROUP BY bc.template_id, t.name, bc.button_id, bc.button_text
+        ORDER BY total_clicks DESC`,
+        [templateId]
+    );
+
+    // Calculate click rate (clicks / sends)
+    const sendStats = await getTemplateAnalytics(templateId);
+    
+    return result.rows.map(row => ({
+        ...row,
+        total_clicks: parseInt(String(row.total_clicks), 10),
+        unique_leads: parseInt(String(row.unique_leads), 10),
+        click_rate: sendStats.totalSent > 0 
+            ? (parseInt(String(row.total_clicks), 10) / sendStats.totalSent) * 100 
+            : 0,
+    }));
+}
+
+/**
+ * Get button clicks by user (for dashboard)
+ */
+export async function getButtonClicksByUser(
+    userId: string, 
+    options?: { templateId?: string; limit?: number; offset?: number }
+): Promise<{ clicks: ButtonClick[]; total: number }> {
+    let countQuery = 'SELECT COUNT(*) FROM button_clicks WHERE user_id = $1';
+    let query = 'SELECT * FROM button_clicks WHERE user_id = $1';
+    const params: unknown[] = [userId];
+
+    if (options?.templateId) {
+        countQuery += ` AND template_id = $2`;
+        query += ` AND template_id = $2`;
+        params.push(options.templateId);
+    }
+
+    query += ' ORDER BY clicked_at DESC';
+
+    if (options?.limit) {
+        query += ` LIMIT $${params.length + 1}`;
+        params.push(options.limit);
+    }
+
+    if (options?.offset) {
+        query += ` OFFSET $${params.length + 1}`;
+        params.push(options.offset);
+    }
+
+    const [countResult, dataResult] = await Promise.all([
+        db.query<{ count: string }>(countQuery, options?.templateId ? [userId, options.templateId] : [userId]),
+        db.query<ButtonClick>(query, params),
+    ]);
+
+    return {
+        clicks: dataResult.rows,
+        total: parseInt(countResult.rows[0]?.count || '0', 10),
+    };
+}
+
+/**
+ * Get lead button activity
+ * Shows which buttons a specific lead has clicked
+ */
+export async function getLeadButtonActivity(customerPhone: string, userId: string): Promise<LeadButtonActivity | null> {
+    const result = await db.query<{
+        customer_phone: string;
+        contact_id: string | null;
+        button_id: string;
+        button_text: string;
+        template_name: string;
+        clicked_at: Date;
+    }>(
+        `SELECT 
+            bc.customer_phone,
+            bc.contact_id,
+            bc.button_id,
+            bc.button_text,
+            t.name as template_name,
+            bc.clicked_at
+        FROM button_clicks bc
+        JOIN templates t ON t.template_id = bc.template_id
+        WHERE bc.customer_phone = $1 AND bc.user_id = $2
+        ORDER BY bc.clicked_at DESC`,
+        [customerPhone, userId]
+    );
+
+    if (result.rows.length === 0) {
+        return null;
+    }
+
+    // Get contact name if available
+    let contactName: string | undefined;
+    const contactId = result.rows[0]?.contact_id;
+    if (contactId) {
+        const contactResult = await db.query<{ name: string }>(
+            'SELECT name FROM contacts WHERE contact_id = $1',
+            [contactId]
+        );
+        contactName = contactResult.rows[0]?.name;
+    }
+
+    return {
+        customer_phone: customerPhone,
+        contact_id: contactId || undefined,
+        contact_name: contactName,
+        buttons_clicked: result.rows.map(row => ({
+            button_id: row.button_id,
+            button_text: row.button_text,
+            template_name: row.template_name,
+            clicked_at: row.clicked_at,
+        })),
+        total_clicks: result.rows.length,
+        last_click_at: result.rows[0]!.clicked_at,
+    };
+}
+
+/**
+ * Find template send by context (for linking button clicks)
+ * Looks up the original template message that was sent to this customer
+ */
+export async function findTemplateSendForButtonClick(
+    customerPhone: string,
+    buttonText: string,
+    userId: string
+): Promise<{ templateSend: TemplateSend; template: Template } | null> {
+    // Find the most recent template send to this customer that has this button
+    const result = await db.query<TemplateSend & { template_id: string }>(
+        `SELECT ts.* 
+         FROM template_sends ts
+         JOIN templates t ON t.template_id = ts.template_id
+         WHERE ts.customer_phone = $1 
+           AND t.user_id = $2
+           AND ts.status IN ('SENT', 'DELIVERED', 'READ')
+           AND t.components::text LIKE $3
+         ORDER BY ts.sent_at DESC
+         LIMIT 1`,
+        [customerPhone, userId, `%"text":"${buttonText}"%`]
+    );
+
+    if (result.rows.length === 0) {
+        return null;
+    }
+
+    const templateSend = result.rows[0]!;
+    const template = await getTemplateById(templateSend.template_id);
+
+    if (!template) {
+        return null;
+    }
+
+    return { templateSend, template };
+}
+
+// ============================================================
+// Template Sending with Media Support
+// ============================================================
+
+/**
+ * Build runtime template components for sending
+ * Handles all header types including media and location
+ */
+export function buildRuntimeComponents(
+    template: Template,
+    variableValues: Record<string, string>,
+    mediaUrl?: string,
+    locationData?: TemplateLocationData
+): unknown[] {
+    const components: unknown[] = [];
+
+    // Header component (if any)
+    if (template.header_type && template.header_type !== 'NONE') {
+        const headerComponent: Record<string, unknown> = { type: 'header' };
+        const parameters: unknown[] = [];
+
+        switch (template.header_type) {
+            case 'TEXT':
+                // Text header with variable substitution
+                if (template.components.header && 'text' in template.components.header) {
+                    const headerVars = template.components.header.text?.match(/\{\{(\d+)\}\}/g) || [];
+                    for (const match of headerVars) {
+                        const position = match.replace(/[{}]/g, '');
+                        parameters.push({
+                            type: 'text',
+                            text: variableValues[position] || '',
+                        });
+                    }
+                }
+                break;
+            case 'IMAGE':
+                parameters.push({
+                    type: 'image',
+                    image: { link: mediaUrl || template.header_media_url },
+                });
+                break;
+            case 'VIDEO':
+                parameters.push({
+                    type: 'video',
+                    video: { link: mediaUrl || template.header_media_url },
+                });
+                break;
+            case 'DOCUMENT':
+                parameters.push({
+                    type: 'document',
+                    document: { 
+                        link: mediaUrl || template.header_media_url,
+                        filename: template.header_document_filename || 'document',
+                    },
+                });
+                break;
+            case 'LOCATION':
+                if (locationData) {
+                    parameters.push({
+                        type: 'location',
+                        location: {
+                            latitude: locationData.latitude,
+                            longitude: locationData.longitude,
+                            name: locationData.name || template.header_location_name,
+                            address: locationData.address || template.header_location_address,
+                        },
+                    });
+                } else if (template.header_location_latitude && template.header_location_longitude) {
+                    parameters.push({
+                        type: 'location',
+                        location: {
+                            latitude: template.header_location_latitude,
+                            longitude: template.header_location_longitude,
+                            name: template.header_location_name,
+                            address: template.header_location_address,
+                        },
+                    });
+                }
+                break;
+        }
+
+        if (parameters.length > 0) {
+            headerComponent.parameters = parameters;
+            components.push(headerComponent);
+        }
+    }
+
+    // Body component with variables
+    const bodyVars = template.components.body.text.match(/\{\{(\d+)\}\}/g) || [];
+    if (bodyVars.length > 0) {
+        const bodyParams = bodyVars.map(match => {
+            const position = match.replace(/[{}]/g, '');
+            return {
+                type: 'text',
+                text: variableValues[position] || '',
+            };
+        });
+        components.push({
+            type: 'body',
+            parameters: bodyParams,
+        });
+    }
+
+    // Button components (for URL buttons with dynamic suffix)
+    if (template.components.buttons?.buttons) {
+        template.components.buttons.buttons.forEach((btn, index) => {
+            if (btn.type === 'URL' && 'url_suffix_variable' in btn && btn.url_suffix_variable) {
+                const suffixValue = variableValues[String(btn.url_suffix_variable)] || '';
+                components.push({
+                    type: 'button',
+                    sub_type: 'url',
+                    index,
+                    parameters: [{ type: 'text', text: suffixValue }],
+                });
+            }
+        });
+    }
+
+    return components;
+}
+
 export const templateService = {
+    // Template CRUD
     createTemplate,
     getTemplateById,
     getTemplatesByUserId,
     getAllTemplates,
     updateTemplate,
     deleteTemplate,
+    
+    // Meta Integration
     submitTemplateToMeta,
     syncTemplateStatusFromMeta,
+    syncTemplatesFromMeta,
     deleteTemplateFromMeta,
     validateTemplateComponents,
+    
+    // Variables
     createTemplateVariable,
     getTemplateVariables,
     deleteTemplateVariable,
     substituteVariables,
+    
+    // Template Sending
     createTemplateSend,
     updateTemplateSendStatus,
     getTemplateSendByPlatformMessageId,
     getTemplateAnalytics,
+    buildRuntimeComponents,
+    
+    // Button Definitions
+    createButtonDefinitionsFromTemplate,
+    getTemplateButtons,
+    updateButtonTrackingId,
+    
+    // Button Click Tracking
+    recordButtonClick,
+    getButtonClickAnalytics,
+    getButtonClicksByUser,
+    getLeadButtonActivity,
+    findTemplateSendForButtonClick,
 };

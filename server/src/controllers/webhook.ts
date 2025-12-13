@@ -3,6 +3,10 @@ import { logger } from '../utils/logger';
 import { enqueueMessage } from '../utils/messageQueue';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../utils/database';
+import { 
+    recordButtonClick, 
+    findTemplateSendForButtonClick 
+} from '../services/templateService';
 
 /**
  * Interface for processed webhook message (matches QueuedMessage)
@@ -49,7 +53,7 @@ interface WhatsAppWebhookPayload {
                     from: string;
                     id: string;
                     timestamp: string;
-                    type: 'text' | 'image' | 'audio' | 'video' | 'document' | 'location' | 'contacts';
+                    type: 'text' | 'image' | 'audio' | 'video' | 'document' | 'location' | 'contacts' | 'interactive' | 'button';
                     text?: { body: string };
                     image?: { mime_type: string; sha256: string; id: string };
                     audio?: { mime_type: string; sha256: string; id: string; voice: boolean };
@@ -57,6 +61,29 @@ interface WhatsAppWebhookPayload {
                     document?: { mime_type: string; sha256: string; id: string; filename: string };
                     location?: { latitude: number; longitude: number; name?: string; address?: string };
                     contacts?: Array<any>;
+                    // Interactive message (button reply from templates)
+                    interactive?: {
+                        type: 'button_reply' | 'list_reply';
+                        button_reply?: {
+                            id: string;      // The button payload/ID
+                            title: string;   // The button text that was clicked
+                        };
+                        list_reply?: {
+                            id: string;
+                            title: string;
+                            description?: string;
+                        };
+                    };
+                    // Button message (quick reply from templates)
+                    button?: {
+                        payload: string;  // Button ID
+                        text: string;     // Button text
+                    };
+                    // Context for reply messages (links to original template message)
+                    context?: {
+                        from: string;
+                        id: string;   // ID of the message being replied to (template message)
+                    };
                 }>;
                 statuses?: Array<{
                     id: string;
@@ -239,6 +266,7 @@ export async function handleMetaWebhook(req: Request, res: Response): Promise<vo
 
 /**
  * Parse WhatsApp webhook payload and extract messages
+ * Also handles interactive button replies and records button clicks
  */
 function parseWhatsAppPayload(payload: WhatsAppWebhookPayload, correlationId: string): ProcessedMessage[] {
     const messages: ProcessedMessage[] = [];
@@ -279,6 +307,47 @@ function parseWhatsAppPayload(payload: WhatsAppWebhookPayload, correlationId: st
                         case 'contacts':
                             messageText = '[Contact shared]';
                             break;
+                        case 'interactive':
+                            // Handle button reply from template
+                            if (message.interactive?.type === 'button_reply' && message.interactive.button_reply) {
+                                const buttonReply = message.interactive.button_reply;
+                                messageText = buttonReply.title;
+                                
+                                // Record the button click asynchronously (don't block message processing)
+                                handleButtonClick({
+                                    phoneNumberId,
+                                    customerPhone: message.from,
+                                    buttonId: buttonReply.id,
+                                    buttonText: buttonReply.title,
+                                    messageId: message.id,
+                                    originalMessageId: message.context?.id,
+                                    correlationId,
+                                }).catch(error => {
+                                    logger.error('Failed to record button click', { error, correlationId });
+                                });
+                            } else if (message.interactive?.type === 'list_reply' && message.interactive.list_reply) {
+                                messageText = message.interactive.list_reply.title;
+                            }
+                            break;
+                        case 'button':
+                            // Handle quick reply button (alternative format)
+                            if (message.button) {
+                                messageText = message.button.text;
+                                
+                                // Record the button click
+                                handleButtonClick({
+                                    phoneNumberId,
+                                    customerPhone: message.from,
+                                    buttonId: message.button.payload,
+                                    buttonText: message.button.text,
+                                    messageId: message.id,
+                                    originalMessageId: message.context?.id,
+                                    correlationId,
+                                }).catch(error => {
+                                    logger.error('Failed to record button click', { error, correlationId });
+                                });
+                            }
+                            break;
                         default:
                             messageText = `[Unsupported message type: ${message.type}]`;
                     }
@@ -306,6 +375,144 @@ function parseWhatsAppPayload(payload: WhatsAppWebhookPayload, correlationId: st
     }
 
     return messages;
+}
+
+/**
+ * Handle button click from WhatsApp webhook
+ * Records the click in button_clicks table for analytics
+ */
+async function handleButtonClick(params: {
+    phoneNumberId: string;
+    customerPhone: string;
+    buttonId: string;
+    buttonText: string;
+    messageId: string;
+    originalMessageId?: string;
+    correlationId: string;
+}): Promise<void> {
+    const { phoneNumberId, customerPhone, buttonId, buttonText, messageId, originalMessageId, correlationId } = params;
+
+    try {
+        logger.info('Processing button click', {
+            phoneNumberId,
+            customerPhone,
+            buttonId,
+            buttonText,
+            correlationId,
+        });
+
+        // Get phone number details to find user_id and internal id
+        const phoneResult = await db.query<{ id: string; user_id: string; waba_id: string }>(
+            'SELECT id, user_id, waba_id FROM phone_numbers WHERE meta_phone_number_id = $1',
+            [phoneNumberId]
+        );
+        
+        if (phoneResult.rows.length === 0) {
+            logger.warn('Phone number not found for button click', { phoneNumberId, correlationId });
+            return;
+        }
+
+        const { id: internalPhoneNumberId, user_id, waba_id } = phoneResult.rows[0]!;
+
+        // Try to find the template send that this button click relates to
+        const sendContext = await findTemplateSendForButtonClick(customerPhone, buttonText, user_id);
+
+        // Get contact_id if exists
+        const contactResult = await db.query<{ contact_id: string }>(
+            'SELECT contact_id FROM contacts WHERE phone = $1 AND user_id = $2',
+            [customerPhone, user_id]
+        );
+        const contactId = contactResult.rows[0]?.contact_id;
+
+        // Get conversation_id if exists
+        const convResult = await db.query<{ conversation_id: string }>(
+            `SELECT c.conversation_id FROM conversations c
+             JOIN agents a ON c.agent_id = a.agent_id
+             JOIN phone_numbers p ON a.phone_number_id = p.id
+             WHERE c.customer_phone = $1 AND p.meta_phone_number_id = $2 AND c.is_active = true
+             LIMIT 1`,
+            [customerPhone, phoneNumberId]
+        );
+        const conversationId = convResult.rows[0]?.conversation_id;
+
+        // Record the button click
+        if (sendContext) {
+            await recordButtonClick({
+                click_id: uuidv4(),
+                template_id: sendContext.template.template_id,
+                template_send_id: sendContext.templateSend.send_id,
+                button_id: buttonId,
+                button_text: buttonText,
+                button_payload: buttonId,
+                customer_phone: customerPhone,
+                contact_id: contactId,
+                conversation_id: conversationId,
+                waba_id: waba_id,
+                phone_number_id: internalPhoneNumberId,
+                user_id,
+                message_id: messageId,
+                original_message_id: originalMessageId || sendContext.templateSend.platform_message_id,
+            });
+
+            logger.info('Button click recorded with template context', {
+                templateId: sendContext.template.template_id,
+                templateName: sendContext.template.name,
+                buttonText,
+                customerPhone,
+                correlationId,
+            });
+        } else {
+            // Record click without template context (orphan click)
+            // Try to find any template with this button
+            const templateResult = await db.query<{ template_id: string }>(
+                `SELECT t.template_id FROM templates t
+                 WHERE t.user_id = $1 
+                   AND t.components::text LIKE $2
+                 LIMIT 1`,
+                [user_id, `%"text":"${buttonText}"%`]
+            );
+
+            if (templateResult.rows.length > 0) {
+                await recordButtonClick({
+                    click_id: uuidv4(),
+                    template_id: templateResult.rows[0]!.template_id,
+                    button_id: buttonId,
+                    button_text: buttonText,
+                    button_payload: buttonId,
+                    customer_phone: customerPhone,
+                    contact_id: contactId,
+                    conversation_id: conversationId,
+                    waba_id: waba_id,
+                    phone_number_id: internalPhoneNumberId,
+                    user_id,
+                    message_id: messageId,
+                    original_message_id: originalMessageId,
+                });
+
+                logger.info('Button click recorded (template found by button text)', {
+                    templateId: templateResult.rows[0]!.template_id,
+                    buttonText,
+                    customerPhone,
+                    correlationId,
+                });
+            } else {
+                logger.warn('Could not find template for button click', {
+                    buttonText,
+                    buttonId,
+                    customerPhone,
+                    correlationId,
+                });
+            }
+        }
+    } catch (error) {
+        logger.error('Error recording button click', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            phoneNumberId,
+            customerPhone,
+            buttonText,
+            correlationId,
+        });
+    }
 }
 
 /**

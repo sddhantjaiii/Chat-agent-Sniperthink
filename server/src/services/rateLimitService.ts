@@ -116,7 +116,11 @@ export async function resetAllDaily(): Promise<number> {
     );
 
     const count = result.rowCount ?? 0;
-    logger.info('Reset daily rate limits for all phone numbers', { count });
+    
+    // Only log if we actually reset something
+    if (count > 0) {
+        logger.info('Reset daily rate limits for all phone numbers', { count });
+    }
     
     return count;
 }

@@ -1,15 +1,27 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { agentsApi } from '@/services/api'
+import { agentsApi, usersApi, CreateAgentData } from '@/services/api'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/ui/use-toast'
-import { Search, Trash2 } from 'lucide-react'
+import { Search, Trash2, Plus, X } from 'lucide-react'
+
+interface CreateAgentForm extends CreateAgentData {
+  user_id: string
+}
 
 export default function AgentsPage() {
   const [search, setSearch] = useState('')
   const [page, _setPage] = useState(0)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [formData, setFormData] = useState<CreateAgentForm>({
+    user_id: '',
+    phone_number_id: '',
+    prompt_id: '',
+    name: '',
+  })
   const limit = 20
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -17,6 +29,35 @@ export default function AgentsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['agents', page],
     queryFn: () => agentsApi.list({ limit, offset: page * limit }),
+  })
+
+  const { data: usersData } = useQuery({
+    queryKey: ['users-list'],
+    queryFn: () => usersApi.list({ limit: 100 }),
+  })
+
+  const { data: selectedUserData } = useQuery({
+    queryKey: ['user', selectedUserId],
+    queryFn: () => usersApi.get(selectedUserId),
+    enabled: !!selectedUserId,
+  })
+
+  const createMutation = useMutation({
+    mutationFn: (data: CreateAgentForm) => usersApi.createAgent(data.user_id, {
+      phone_number_id: data.phone_number_id,
+      prompt_id: data.prompt_id,
+      name: data.name,
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+      toast({ title: 'Agent created successfully' })
+      setShowCreateForm(false)
+      setFormData({ user_id: '', phone_number_id: '', prompt_id: '', name: '' })
+      setSelectedUserId('')
+    },
+    onError: (error: any) => {
+      toast({ variant: 'destructive', title: 'Failed to create agent', description: error?.response?.data?.message })
+    },
   })
 
   const deleteMutation = useMutation({
@@ -30,6 +71,20 @@ export default function AgentsPage() {
     },
   })
 
+  const handleUserChange = (userId: string) => {
+    setSelectedUserId(userId)
+    setFormData({ ...formData, user_id: userId, phone_number_id: '' })
+  }
+
+  const handleCreateSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!formData.user_id || !formData.phone_number_id || !formData.prompt_id || !formData.name) {
+      toast({ variant: 'destructive', title: 'All fields are required' })
+      return
+    }
+    createMutation.mutate(formData)
+  }
+
   const filteredData = data?.data.filter(
     (agent) =>
       agent.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -38,10 +93,98 @@ export default function AgentsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-3xl font-bold tracking-tight">Agents</h2>
-        <p className="text-muted-foreground">Manage AI agents across all users</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-3xl font-bold tracking-tight">Agents</h2>
+          <p className="text-muted-foreground">Manage AI agents across all users</p>
+        </div>
+        <Button onClick={() => setShowCreateForm(true)}>
+          <Plus className="h-4 w-4 mr-2" />
+          Create Agent
+        </Button>
       </div>
+
+      {/* Create Agent Form */}
+      {showCreateForm && (
+        <Card className="border-primary">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle>Create New Agent</CardTitle>
+              <CardDescription>Create an AI agent for a user's phone number</CardDescription>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => { setShowCreateForm(false); setSelectedUserId(''); }}>
+              <X className="h-4 w-4" />
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleCreateSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium mb-1 block">User *</label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border"
+                    value={formData.user_id}
+                    onChange={(e) => handleUserChange(e.target.value)}
+                    required
+                  >
+                    <option value="">Select user</option>
+                    {usersData?.data.map((user) => (
+                      <option key={user.user_id} value={user.user_id}>
+                        {user.email} ({user.user_id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Phone Number *</label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border"
+                    value={formData.phone_number_id}
+                    onChange={(e) => setFormData({ ...formData, phone_number_id: e.target.value })}
+                    disabled={!selectedUserId || !selectedUserData}
+                    required
+                  >
+                    <option value="">
+                      {!selectedUserId ? 'Select user first' : selectedUserData?.phoneNumbers.length === 0 ? 'No phone numbers' : 'Select phone number'}
+                    </option>
+                    {selectedUserData?.phoneNumbers.map((phone) => (
+                      <option key={phone.id} value={phone.id}>
+                        {phone.display_name || phone.meta_phone_number_id} ({phone.platform})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Agent Name *</label>
+                  <Input
+                    placeholder="e.g., Sales Assistant"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium mb-1 block">OpenAI Prompt ID *</label>
+                  <Input
+                    placeholder="e.g., pmpt_abc123..."
+                    value={formData.prompt_id}
+                    onChange={(e) => setFormData({ ...formData, prompt_id: e.target.value })}
+                    required
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button type="submit" disabled={createMutation.isPending}>
+                  {createMutation.isPending ? 'Creating...' : 'Create Agent'}
+                </Button>
+                <Button type="button" variant="outline" onClick={() => { setShowCreateForm(false); setSelectedUserId(''); }}>
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

@@ -20,6 +20,7 @@ import type {
     Conversation,
     Message,
     DashboardStats,
+    TemplateComponents,
 } from '../models/types';
 
 // Initialize services with database pool
@@ -1230,9 +1231,15 @@ export async function listTemplates(req: Request, res: Response): Promise<void> 
             status: status as any,
         });
 
+        // Convert components to array format for frontend compatibility
+        const templatesWithArrayComponents = templates.map(t => ({
+            ...t,
+            components: componentsToArray(t.components),
+        }));
+
         res.status(200).json({
             success: true,
-            data: templates,
+            data: templatesWithArrayComponents,
             pagination: {
                 total,
                 limit,
@@ -1275,10 +1282,16 @@ export async function getTemplate(req: Request, res: Response): Promise<void> {
         const variables = await templateService.getTemplateVariables(templateId!);
         const analytics = await templateService.getTemplateAnalytics(templateId!);
 
+        // Convert components to array format for frontend compatibility
+        const templateWithArrayComponents = {
+            ...template,
+            components: componentsToArray(template.components),
+        };
+
         res.status(200).json({
             success: true,
             data: {
-                template,
+                template: templateWithArrayComponents,
                 variables,
                 analytics,
             },
@@ -1297,6 +1310,98 @@ export async function getTemplate(req: Request, res: Response): Promise<void> {
 }
 
 /**
+ * Convert array-style components (Meta format) to object-style components (our format)
+ */
+function normalizeTemplateComponents(components: unknown): Record<string, unknown> {
+    // If already in object format with 'body' key, return as-is
+    if (components && typeof components === 'object' && !Array.isArray(components) && 'body' in components) {
+        return components as Record<string, unknown>;
+    }
+
+    // If array format, convert to object format
+    if (Array.isArray(components)) {
+        const result: Record<string, unknown> = {};
+        const buttons: unknown[] = [];
+
+        for (const comp of components) {
+            if (typeof comp !== 'object' || !comp) continue;
+            const component = comp as Record<string, unknown>;
+            const type = (component.type as string)?.toUpperCase();
+
+            if (type === 'HEADER') {
+                result.header = {
+                    type: 'HEADER',
+                    format: component.format || 'TEXT',
+                    text: component.text,
+                    example: component.example,
+                };
+            } else if (type === 'BODY') {
+                result.body = {
+                    type: 'BODY',
+                    text: component.text,
+                    example: component.example,
+                };
+            } else if (type === 'FOOTER') {
+                result.footer = {
+                    type: 'FOOTER',
+                    text: component.text,
+                };
+            } else if (type === 'BUTTONS') {
+                result.buttons = {
+                    type: 'BUTTONS',
+                    buttons: component.buttons || [],
+                };
+            } else if (type === 'BUTTON' || ['QUICK_REPLY', 'URL', 'PHONE_NUMBER'].includes(type)) {
+                buttons.push(component);
+            }
+        }
+
+        // If individual buttons were provided, wrap them
+        if (buttons.length > 0 && !result.buttons) {
+            result.buttons = { type: 'BUTTONS', buttons };
+        }
+
+        return result;
+    }
+
+    // Return empty object if invalid
+    return {};
+}
+
+/**
+ * Convert object-style components (our format) to array-style components (frontend/Meta format)
+ */
+function componentsToArray(components: unknown): unknown[] {
+    // If already an array, return as-is
+    if (Array.isArray(components)) {
+        return components;
+    }
+
+    // If object format, convert to array
+    if (components && typeof components === 'object') {
+        const result: unknown[] = [];
+        const obj = components as Record<string, unknown>;
+
+        if (obj.header) {
+            result.push(obj.header);
+        }
+        if (obj.body) {
+            result.push(obj.body);
+        }
+        if (obj.footer) {
+            result.push(obj.footer);
+        }
+        if (obj.buttons) {
+            result.push(obj.buttons);
+        }
+
+        return result;
+    }
+
+    return [];
+}
+
+/**
  * POST /admin/templates
  * Create template
  */
@@ -1305,13 +1410,16 @@ export async function createTemplate(req: Request, res: Response): Promise<void>
     const { user_id, phone_number_id, name, category, components, variables } = req.body;
 
     try {
+        // Normalize components from array format (Meta) to object format (our schema)
+        const normalizedComponents = normalizeTemplateComponents(components) as unknown as TemplateComponents;
+
         const template = await templateService.createTemplate({
             template_id: uuidv4(),
             user_id,
             phone_number_id,
             name,
             category,
-            components,
+            components: normalizedComponents,
         });
 
         // Create variables if provided
@@ -1415,6 +1523,74 @@ export async function deleteTemplate(req: Request, res: Response): Promise<void>
         res.status(500).json({
             error: 'Internal Server Error',
             message: 'Failed to delete template',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * Sync templates from Meta
+ * POST /admin/templates/sync
+ * 
+ * Imports existing approved templates from Meta that aren't in our database
+ */
+export async function syncTemplates(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { user_id, phone_number_id } = req.body;
+
+    if (!user_id) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'user_id is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (!phone_number_id) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'phone_number_id is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const result = await templateService.syncTemplatesFromMeta(user_id, phone_number_id);
+
+        logger.info('Templates synced from Meta', { 
+            correlationId, 
+            userId: user_id, 
+            phoneNumberId: phone_number_id,
+            imported: result.imported.length,
+            updated: result.updated.length,
+            errors: result.errors.length,
+        });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                imported: result.imported,
+                updated: result.updated,
+                errors: result.errors,
+                summary: {
+                    totalImported: result.imported.length,
+                    totalUpdated: result.updated.length,
+                    totalErrors: result.errors.length,
+                }
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to sync templates from Meta', { correlationId, userId: user_id, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: error instanceof Error ? error.message : 'Failed to sync templates',
             timestamp: new Date().toISOString(),
             correlationId,
         });
@@ -1852,6 +2028,141 @@ export async function deleteCampaign(req: Request, res: Response): Promise<void>
     }
 }
 
+// =====================================
+// Button Click Analytics
+// =====================================
+
+/**
+ * GET /admin/templates/:templateId/button-clicks
+ * Get button click analytics for a specific template
+ */
+export async function getTemplateButtonClicks(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { templateId } = req.params;
+
+    try {
+        const analytics = await templateService.getButtonClickAnalytics(templateId!);
+
+        res.status(200).json({
+            success: true,
+            data: analytics,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to get button click analytics', { correlationId, templateId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to get button click analytics',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /admin/button-clicks
+ * Get all button clicks for a user with optional filtering
+ */
+export async function listButtonClicks(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const limit = parseInt(req.query.limit as string, 10) || 50;
+    const offset = parseInt(req.query.offset as string, 10) || 0;
+    const userId = req.query.userId as string;
+    const templateId = req.query.templateId as string;
+
+    if (!userId) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'userId is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const { clicks, total } = await templateService.getButtonClicksByUser(userId, {
+            templateId,
+            limit,
+            offset,
+        });
+
+        res.status(200).json({
+            success: true,
+            data: clicks,
+            pagination: {
+                total,
+                limit,
+                offset,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to list button clicks', { correlationId, userId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to list button clicks',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /admin/leads/:customerPhone/button-activity
+ * Get button activity for a specific lead
+ */
+export async function getLeadButtonActivity(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { customerPhone } = req.params;
+    const userId = req.query.userId as string;
+
+    if (!userId) {
+        res.status(400).json({
+            error: 'Bad Request',
+            message: 'userId query parameter is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const activity = await templateService.getLeadButtonActivity(customerPhone!, userId);
+
+        if (!activity) {
+            res.status(200).json({
+                success: true,
+                data: {
+                    customer_phone: customerPhone,
+                    buttons_clicked: [],
+                    total_clicks: 0,
+                },
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        res.status(200).json({
+            success: true,
+            data: activity,
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to get lead button activity', { correlationId, customerPhone, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to get lead button activity',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
 export const adminController = {
     // Dashboard
     getDashboardStats,
@@ -1882,6 +2193,7 @@ export const adminController = {
     getTemplate,
     createTemplate,
     submitTemplate,
+    syncTemplates,
     deleteTemplate,
     // Contacts
     listContacts,
@@ -1896,4 +2208,8 @@ export const adminController = {
     resumeCampaign,
     cancelCampaign,
     deleteCampaign,
+    // Button Click Analytics
+    getTemplateButtonClicks,
+    listButtonClicks,
+    getLeadButtonActivity,
 };

@@ -255,6 +255,52 @@ export async function startCampaign(campaignId: string): Promise<Campaign> {
 }
 
 /**
+ * Start a campaign with specific contact IDs (used by external API)
+ * This skips the filter-based recipient lookup
+ */
+export async function startCampaignWithContactIds(
+    campaignId: string,
+    contactIds: string[]
+): Promise<Campaign> {
+    const campaign = await getCampaignById(campaignId);
+    if (!campaign) {
+        throw new Error('Campaign not found');
+    }
+
+    if (!['DRAFT', 'SCHEDULED'].includes(campaign.status)) {
+        throw new Error(`Cannot start campaign with status ${campaign.status}`);
+    }
+
+    // Get contacts by IDs
+    const contacts = await contactService.getContactsByIds(contactIds);
+    
+    // Filter out inactive or opted-out contacts
+    const eligibleContacts = contacts.filter(c => c.is_active && !c.opted_out);
+
+    if (eligibleContacts.length === 0) {
+        throw new Error('No eligible recipients found');
+    }
+
+    // Create recipient records
+    await createRecipientsFromContacts(campaignId, eligibleContacts);
+
+    // Update campaign status
+    const updated = await updateCampaign(campaignId, {
+        status: 'RUNNING',
+        total_recipients: eligibleContacts.length,
+        started_at: new Date(),
+    });
+
+    logger.info('Campaign started with contact IDs', {
+        campaignId,
+        totalRecipients: eligibleContacts.length,
+        providedContacts: contactIds.length,
+    });
+
+    return updated!;
+}
+
+/**
  * Pause a running campaign
  */
 export async function pauseCampaign(campaignId: string): Promise<Campaign> {
@@ -726,6 +772,7 @@ export const campaignService = {
     deleteCampaign,
     // Campaign lifecycle
     startCampaign,
+    startCampaignWithContactIds,
     pauseCampaign,
     resumeCampaign,
     cancelCampaign,
@@ -745,6 +792,7 @@ export const campaignService = {
     updateRecipientStatus,
     getRecipientByContactAndCampaign,
     getRecipientStats,
+    getCampaignRecipientStats: getRecipientStats, // Alias for external API
     syncCampaignStats,
     checkCampaignComplete,
 };

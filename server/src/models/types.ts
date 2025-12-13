@@ -25,6 +25,7 @@ export interface PhoneNumber {
   meta_phone_number_id: string;
   access_token: string;
   display_name?: string;
+  waba_id?: string;  // WhatsApp Business Account ID for template management
   created_at: Date;
   updated_at: Date;
 }
@@ -244,14 +245,51 @@ export interface UpdatePhoneNumberRateLimitData {
 // Template types
 export type TemplateCategory = 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
 export type TemplateStatus = 'DRAFT' | 'PENDING' | 'APPROVED' | 'REJECTED' | 'PAUSED' | 'DISABLED';
+export type TemplateHeaderFormat = 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'LOCATION';
 
 // Template component types (WhatsApp structure)
-export interface TemplateHeaderComponent {
+// TEXT header
+export interface TemplateTextHeaderComponent {
   type: 'HEADER';
   format: 'TEXT';
   text: string;
   example?: { header_text: string[] };
 }
+
+// IMAGE header
+export interface TemplateImageHeaderComponent {
+  type: 'HEADER';
+  format: 'IMAGE';
+  example?: { header_handle: string[] }; // Media handle or URL
+}
+
+// VIDEO header
+export interface TemplateVideoHeaderComponent {
+  type: 'HEADER';
+  format: 'VIDEO';
+  example?: { header_handle: string[] }; // Media handle or URL
+}
+
+// DOCUMENT header
+export interface TemplateDocumentHeaderComponent {
+  type: 'HEADER';
+  format: 'DOCUMENT';
+  example?: { header_handle: string[] }; // Media handle or URL
+}
+
+// LOCATION header (no media, sent at runtime)
+export interface TemplateLocationHeaderComponent {
+  type: 'HEADER';
+  format: 'LOCATION';
+}
+
+// Union type for all header formats
+export type TemplateHeaderComponent = 
+  | TemplateTextHeaderComponent 
+  | TemplateImageHeaderComponent 
+  | TemplateVideoHeaderComponent 
+  | TemplateDocumentHeaderComponent
+  | TemplateLocationHeaderComponent;
 
 export interface TemplateBodyComponent {
   type: 'BODY';
@@ -264,14 +302,42 @@ export interface TemplateFooterComponent {
   text: string;
 }
 
-export type TemplateButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER';
+// Button types - COPY_CODE added
+export type TemplateButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER' | 'COPY_CODE';
 
-export interface TemplateButton {
-  type: TemplateButtonType;
+export interface TemplateQuickReplyButton {
+  type: 'QUICK_REPLY';
   text: string;
-  url?: string; // For URL buttons
-  phone_number?: string; // For PHONE_NUMBER buttons
+  // For tracking (custom field, not sent to Meta)
+  tracking_id?: string;
 }
+
+export interface TemplateUrlButton {
+  type: 'URL';
+  text: string;
+  url: string;
+  // For dynamic URL suffix (e.g., {{1}} at end)
+  url_suffix_variable?: number;
+  example?: string[];
+}
+
+export interface TemplatePhoneButton {
+  type: 'PHONE_NUMBER';
+  text: string;
+  phone_number: string;
+}
+
+export interface TemplateCopyCodeButton {
+  type: 'COPY_CODE';
+  example: string; // The code to copy (max 15 chars)
+}
+
+// Union type for all button types
+export type TemplateButton = 
+  | TemplateQuickReplyButton 
+  | TemplateUrlButton 
+  | TemplatePhoneButton 
+  | TemplateCopyCodeButton;
 
 export interface TemplateButtonsComponent {
   type: 'BUTTONS';
@@ -291,6 +357,14 @@ export interface TemplateComponents {
   buttons?: TemplateButtonsComponent;
 }
 
+// Location data for runtime sending (LOCATION headers)
+export interface TemplateLocationData {
+  latitude: number;
+  longitude: number;
+  name?: string;
+  address?: string;
+}
+
 export interface Template {
   template_id: string;
   user_id: string;
@@ -300,6 +374,20 @@ export interface Template {
   status: TemplateStatus;
   language: string;
   components: TemplateComponents;
+  
+  // Header media fields (new)
+  header_type: TemplateHeaderFormat | 'NONE';
+  header_media_url?: string;
+  header_document_filename?: string;
+  header_location_latitude?: number;
+  header_location_longitude?: number;
+  header_location_name?: string;
+  header_location_address?: string;
+  
+  // WABA association
+  waba_id?: string;
+  
+  // Meta integration
   meta_template_id?: string;
   rejection_reason?: string;
   submitted_at?: Date;
@@ -316,6 +404,16 @@ export interface CreateTemplateData {
   category: TemplateCategory;
   language?: string;
   components: TemplateComponents;
+  
+  // Header media fields (new)
+  header_type?: TemplateHeaderFormat | 'NONE';
+  header_media_url?: string;
+  header_document_filename?: string;
+  header_location_latitude?: number;
+  header_location_longitude?: number;
+  header_location_name?: string;
+  header_location_address?: string;
+  waba_id?: string;
 }
 
 export interface UpdateTemplateData {
@@ -323,6 +421,16 @@ export interface UpdateTemplateData {
   category?: TemplateCategory;
   components?: TemplateComponents;
   status?: TemplateStatus;
+  
+  // Header media fields (new)
+  header_type?: TemplateHeaderFormat | 'NONE';
+  header_media_url?: string;
+  header_document_filename?: string;
+  header_location_latitude?: number;
+  header_location_longitude?: number;
+  header_location_name?: string;
+  header_location_address?: string;
+  
   meta_template_id?: string;
   rejection_reason?: string;
   submitted_at?: Date;
@@ -349,9 +457,12 @@ export interface TemplateVariable {
   variable_name: string;
   position: number; // 1-10, maps to {{1}}-{{10}}
   component_type: TemplateComponentType;
-  extraction_field?: ExtractionFieldMapping;
+  extraction_field?: ExtractionFieldMapping; // Optional: for server-side auto-fill
   default_value?: string;
   sample_value?: string;
+  description?: string; // Human-readable description for dashboard UI
+  is_required?: boolean; // Whether value must be provided
+  placeholder?: string; // Placeholder text for input fields
   created_at: Date;
   updated_at: Date;
 }
@@ -362,9 +473,12 @@ export interface CreateTemplateVariableData {
   variable_name: string;
   position: number;
   component_type?: TemplateComponentType;
-  extraction_field?: ExtractionFieldMapping;
+  extraction_field?: ExtractionFieldMapping; // Optional: dashboard can ignore this
   default_value?: string;
   sample_value?: string;
+  description?: string;
+  is_required?: boolean;
+  placeholder?: string;
 }
 
 // Template send tracking
@@ -395,6 +509,107 @@ export interface CreateTemplateSendData {
   campaign_id?: string;
   customer_phone: string;
   variable_values?: Record<string, string>;
+}
+
+// ============================================================
+// Template Button Definition Types
+// ============================================================
+
+export interface TemplateButtonDefinition {
+  button_id: string;
+  template_id: string;
+  button_type: TemplateButtonType;
+  button_text: string;
+  button_index: number;
+  button_url?: string;
+  button_url_suffix_variable?: number;
+  button_phone?: string;
+  copy_code_example?: string;
+  tracking_id?: string; // Custom identifier for analytics (e.g., "pricing_cta")
+  total_clicks: number;
+  unique_clicks: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface CreateTemplateButtonData {
+  button_id: string;
+  template_id: string;
+  button_type: TemplateButtonType;
+  button_text: string;
+  button_index: number;
+  button_url?: string;
+  button_url_suffix_variable?: number;
+  button_phone?: string;
+  copy_code_example?: string;
+  tracking_id?: string;
+}
+
+// ============================================================
+// Button Click Tracking Types
+// ============================================================
+
+export interface ButtonClick {
+  click_id: string;
+  template_id: string;
+  template_send_id?: string;
+  button_id: string;
+  button_text: string;
+  button_index?: number;
+  button_payload?: string;
+  customer_phone: string;
+  contact_id?: string;
+  conversation_id?: string;
+  waba_id?: string;
+  phone_number_id?: string;
+  user_id: string;
+  message_id?: string;
+  original_message_id?: string;
+  clicked_at: Date;
+  created_at: Date;
+}
+
+export interface CreateButtonClickData {
+  click_id: string;
+  template_id: string;
+  template_send_id?: string;
+  button_id: string;
+  button_text: string;
+  button_index?: number;
+  button_payload?: string;
+  customer_phone: string;
+  contact_id?: string;
+  conversation_id?: string;
+  waba_id?: string;
+  phone_number_id?: string;
+  user_id: string;
+  message_id?: string;
+  original_message_id?: string;
+}
+
+// Button analytics types
+export interface ButtonClickAnalytics {
+  template_id: string;
+  template_name: string;
+  button_id: string;
+  button_text: string;
+  total_clicks: number;
+  unique_leads: number;
+  click_rate?: number; // clicks / sends
+}
+
+export interface LeadButtonActivity {
+  customer_phone: string;
+  contact_id?: string;
+  contact_name?: string;
+  buttons_clicked: {
+    button_id: string;
+    button_text: string;
+    template_name: string;
+    clicked_at: Date;
+  }[];
+  total_clicks: number;
+  last_click_at: Date;
 }
 
 // ============================================================
