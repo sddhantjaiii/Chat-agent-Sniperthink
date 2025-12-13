@@ -543,4 +543,23 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
+// Bootstrap the application
+async function bootstrap() {
+  console.log('[STARTUP] Bootstrap starting...');
+  try {
+    console.log('[STARTUP] Calling app.initialize()...');
+    await app.initialize();
+    console.log('[STARTUP] Initialize complete, calling app.listen()...');
+    app.listen();
+    console.log('[STARTUP] Server is starting...');
+  } catch (error) {
+    console.error('[STARTUP] Failed to start application:', error);
+    logger.error('Failed to start application', { error: (error as Error).message });
+    process.exit(1);
+  }
+}
+
+// Start the application
+bootstrap();
+
 export default app;
