@@ -1178,6 +1178,8 @@ export async function listTemplates(req: Request, res: Response): Promise<void> 
                     variables: variables.map(v => ({
                         position: v.position,
                         variable_name: v.variable_name,
+                        component_type: v.component_type,
+                        dashboard_mapping: v.dashboard_mapping,
                         default_value: v.default_value,
                         sample_value: v.sample_value,
                     })),
