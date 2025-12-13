@@ -2490,11 +2490,13 @@ export async function createWebchatChannel(req: Request, res: Response): Promise
             finalPromptId = sourceAgentInfo!.prompt_id;
         }
 
-        // Generate unique IDs
-        const randomString = Math.random().toString(36).substring(2, 11);
-        const webchat_id = `webchat_${user_id}_${randomString}`;
-        const phone_number_id = `pn_${webchat_id}`;
-        const new_agent_id = `agent_${webchat_id}`;
+        // Generate unique IDs (keep under VARCHAR(50) limit)
+        // Format: wc_{timestamp}_{random} = ~25 chars max
+        const ts = Date.now().toString(36); // ~8 chars
+        const rand = Math.random().toString(36).substring(2, 8); // 6 chars
+        const webchat_id = `wc_${ts}_${rand}`; // ~17 chars
+        const phone_number_id = `pn_${ts}_${rand}`; // ~17 chars
+        const new_agent_id = `ag_${ts}_${rand}`; // ~17 chars
 
         // Start transaction
         await db.query('BEGIN');
