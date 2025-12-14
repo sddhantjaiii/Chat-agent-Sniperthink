@@ -596,26 +596,81 @@ async function handleMessageDeliveryStatus(
             'read': 'READ',
             'failed': 'FAILED'
         };
+        
+        const mappedStatus = templateStatusMap[deliveryStatus] || 'SENT';
+        const errorMessage = errors?.[0]?.message || null;
 
-        const templateSendUpdate = await db.query(
-            `UPDATE template_sends SET 
+        // Build dynamic update based on status
+        let updateQuery: string;
+        let updateParams: (string | null)[];
+        
+        if (deliveryStatus === 'delivered') {
+            updateQuery = `UPDATE template_sends SET 
                 status = $1,
-                delivered_at = CASE WHEN $1 = 'DELIVERED' THEN CURRENT_TIMESTAMP ELSE delivered_at END,
-                read_at = CASE WHEN $1 = 'READ' THEN CURRENT_TIMESTAMP ELSE read_at END,
+                delivered_at = CURRENT_TIMESTAMP,
                 error_message = $2,
                 updated_at = CURRENT_TIMESTAMP
              WHERE platform_message_id = $3
-             RETURNING send_id, template_id`,
-            [templateStatusMap[deliveryStatus] || 'SENT', errors?.[0]?.message || null, messageId]
-        );
+             RETURNING send_id, template_id`;
+            updateParams = [mappedStatus, errorMessage, messageId];
+        } else if (deliveryStatus === 'read') {
+            updateQuery = `UPDATE template_sends SET 
+                status = $1,
+                read_at = CURRENT_TIMESTAMP,
+                error_message = $2,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE platform_message_id = $3
+             RETURNING send_id, template_id`;
+            updateParams = [mappedStatus, errorMessage, messageId];
+        } else {
+            updateQuery = `UPDATE template_sends SET 
+                status = $1,
+                error_message = $2,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE platform_message_id = $3
+             RETURNING send_id, template_id`;
+            updateParams = [mappedStatus, errorMessage, messageId];
+        }
+
+        const templateSendUpdate = await db.query(updateQuery, updateParams);
 
         if (templateSendUpdate.rowCount && templateSendUpdate.rowCount > 0) {
             logger.info('Template send status updated', {
                 sendId: templateSendUpdate.rows[0].send_id,
                 templateId: templateSendUpdate.rows[0].template_id,
-                newStatus: templateStatusMap[deliveryStatus],
+                newStatus: mappedStatus,
                 correlationId,
             });
+        }
+
+        // Log specific error codes for debugging
+        if (errors && errors.length > 0) {
+            const errorCode = errors[0].code;
+            let errorHint = '';
+            
+            switch (errorCode) {
+                case 131049:
+                    errorHint = '❌ META PER-USER MARKETING LIMIT: This user has received too many marketing messages. Wait 24+ hours or use UTILITY template instead.';
+                    break;
+                case 131026:
+                    errorHint = '❌ MESSAGE UNDELIVERABLE: Recipient may not be on WhatsApp, or hasn\'t accepted latest Terms.';
+                    break;
+                case 131047:
+                    errorHint = '❌ 24-HOUR WINDOW EXPIRED: User hasn\'t replied in 24 hours. Only templates can be sent.';
+                    break;
+                case 131050:
+                    errorHint = '❌ USER OPTED OUT: User has blocked marketing messages from your business.';
+                    break;
+            }
+            
+            if (errorHint) {
+                logger.warn(errorHint, {
+                    correlationId,
+                    messageId,
+                    errorCode,
+                    errorDetails: errors[0],
+                });
+            }
         }
 
         logger.debug('Message delivery status updated in database', {
