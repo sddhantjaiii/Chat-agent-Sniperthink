@@ -644,7 +644,7 @@ async function handleMessageDeliveryStatus(
         }
 
         // Log specific error codes for debugging
-        if (errors && errors.length > 0) {
+        if (errors && errors.length > 0 && errors[0]) {
             const errorCode = errors[0].code;
             let errorHint = '';
             
