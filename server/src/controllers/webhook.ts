@@ -290,6 +290,30 @@ function parseWhatsAppPayload(payload: WhatsAppWebhookPayload, correlationId: st
     try {
         for (const entry of payload.entry) {
             for (const change of entry.changes) {
+                // Handle delivery status updates
+                if (change.field === 'messages' && change.value.statuses) {
+                    for (const status of change.value.statuses) {
+                        logger.info('📬 Message delivery status received', {
+                            messageId: status.id,
+                            status: status.status,
+                            recipientId: status.recipient_id,
+                            timestamp: status.timestamp,
+                            errors: status.errors,
+                            correlationId,
+                        });
+                        
+                        // Update delivery status in database
+                        handleMessageDeliveryStatus(status, correlationId).catch(error => {
+                            logger.error('Failed to update message delivery status', {
+                                messageId: status.id,
+                                status: status.status,
+                                error: error instanceof Error ? error.message : 'Unknown error',
+                                correlationId,
+                            });
+                        });
+                    }
+                }
+                
                 if (change.field !== 'messages' || !change.value.messages) {
                     continue;
                 }
@@ -528,6 +552,85 @@ async function handleButtonClick(params: {
             buttonText,
             correlationId,
         });
+    }
+}
+
+/**
+ * Handle message delivery status updates from WhatsApp
+ * Updates the message status and template_sends status in database
+ */
+async function handleMessageDeliveryStatus(
+    status: {
+        id: string;
+        status: 'sent' | 'delivered' | 'read' | 'failed';
+        timestamp: string;
+        recipient_id: string;
+        errors?: Array<{ code: number; title: string; message: string }>;
+    },
+    correlationId: string
+): Promise<void> {
+    try {
+        const { id: messageId, status: deliveryStatus, errors } = status;
+        
+        // Update message_delivery_status table
+        await db.query(
+            `INSERT INTO message_delivery_status (message_id, platform_message_id, status, error_message, updated_at)
+             VALUES ($1, $1, $2, $3, CURRENT_TIMESTAMP)
+             ON CONFLICT (message_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                error_message = EXCLUDED.error_message,
+                updated_at = CURRENT_TIMESTAMP`,
+            [messageId, deliveryStatus, errors?.[0]?.message || null]
+        );
+
+        // Update messages table status
+        await db.query(
+            `UPDATE messages SET status = $1 WHERE platform_message_id = $2`,
+            [deliveryStatus, messageId]
+        );
+
+        // Update template_sends table if this is a template message
+        const templateStatusMap: Record<string, string> = {
+            'sent': 'SENT',
+            'delivered': 'DELIVERED',
+            'read': 'READ',
+            'failed': 'FAILED'
+        };
+
+        const templateSendUpdate = await db.query(
+            `UPDATE template_sends SET 
+                status = $1,
+                delivered_at = CASE WHEN $1 = 'DELIVERED' THEN CURRENT_TIMESTAMP ELSE delivered_at END,
+                read_at = CASE WHEN $1 = 'READ' THEN CURRENT_TIMESTAMP ELSE read_at END,
+                error_message = $2,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE platform_message_id = $3
+             RETURNING send_id, template_id`,
+            [templateStatusMap[deliveryStatus] || 'SENT', errors?.[0]?.message || null, messageId]
+        );
+
+        if (templateSendUpdate.rowCount && templateSendUpdate.rowCount > 0) {
+            logger.info('Template send status updated', {
+                sendId: templateSendUpdate.rows[0].send_id,
+                templateId: templateSendUpdate.rows[0].template_id,
+                newStatus: templateStatusMap[deliveryStatus],
+                correlationId,
+            });
+        }
+
+        logger.debug('Message delivery status updated in database', {
+            messageId,
+            status: deliveryStatus,
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to handle message delivery status', {
+            messageId: status.id,
+            status: status.status,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            correlationId,
+        });
+        throw error;
     }
 }
 
