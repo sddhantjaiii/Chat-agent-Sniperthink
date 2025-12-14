@@ -1748,11 +1748,24 @@ export async function sendSingleMessage(req: Request, res: Response): Promise<vo
 
         // Get template
         const template = await templateService.getTemplateById(template_id);
-        if (!template || template.status !== 'APPROVED') {
+        if (!template) {
             res.status(400).json({
                 success: false,
                 error: 'Bad Request',
-                message: 'Template not found or not approved',
+                message: `Template not found with ID: ${template_id}`,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+        
+        if (template.status !== 'APPROVED') {
+            res.status(400).json({
+                success: false,
+                error: 'Bad Request',
+                message: `Template status is '${template.status}', must be 'APPROVED' to send messages`,
+                template_id: template.template_id,
+                current_status: template.status,
                 timestamp: new Date().toISOString(),
                 correlationId,
             });
