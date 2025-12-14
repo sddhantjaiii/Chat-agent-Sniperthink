@@ -1818,22 +1818,59 @@ export async function sendSingleMessage(req: Request, res: Response): Promise<vo
 
         const agent = agentResult.rows[0];
 
-        // Create conversation with OpenAI context
-        const conversationId = uuidv4();
-        const templateText = getTemplateText(template, variables || {});
-        
-        // Create OpenAI conversation with template as context
-        const openaiConversationId = await createOpenAIConversationForTemplate(
-            templateText,
-            correlationId
+        // Check if active conversation already exists for this agent and customer
+        const existingConvResult = await db.query(
+            `SELECT conversation_id, openai_conversation_id FROM conversations 
+             WHERE agent_id = $1 AND customer_phone = $2 AND is_active = true
+             ORDER BY created_at DESC LIMIT 1`,
+            [agent.agent_id, normalizedPhone]
         );
 
-        // Insert conversation record
-        await db.query(
-            `INSERT INTO conversations (conversation_id, agent_id, customer_phone, openai_conversation_id, created_at, last_message_at, is_active)
-             VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, true)`,
-            [conversationId, agent.agent_id, normalizedPhone, openaiConversationId]
-        );
+        const templateText = getTemplateText(template, variables || {});
+        let conversationId: string;
+        let openaiConversationId: string | null;
+
+        if (existingConvResult.rows.length > 0) {
+            // Use existing conversation
+            conversationId = existingConvResult.rows[0].conversation_id;
+            openaiConversationId = existingConvResult.rows[0].openai_conversation_id;
+            
+            // Update last_message_at timestamp
+            await db.query(
+                `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE conversation_id = $1`,
+                [conversationId]
+            );
+            
+            logger.info('Using existing conversation for template send', {
+                correlationId,
+                conversationId,
+                agentId: agent.agent_id,
+                customerPhone: normalizedPhone,
+            });
+        } else {
+            // Create new conversation with OpenAI context
+            conversationId = uuidv4();
+            
+            // Create OpenAI conversation with template as context
+            openaiConversationId = await createOpenAIConversationForTemplate(
+                templateText,
+                correlationId
+            );
+
+            // Insert conversation record
+            await db.query(
+                `INSERT INTO conversations (conversation_id, agent_id, customer_phone, openai_conversation_id, created_at, last_message_at, is_active)
+                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, true)`,
+                [conversationId, agent.agent_id, normalizedPhone, openaiConversationId]
+            );
+            
+            logger.info('Created new conversation for template send', {
+                correlationId,
+                conversationId,
+                agentId: agent.agent_id,
+                customerPhone: normalizedPhone,
+            });
+        }
 
         // Deduct 1 credit
         const creditsRemaining = await deductCredits(userId, 1);
@@ -1867,10 +1904,18 @@ export async function sendSingleMessage(req: Request, res: Response): Promise<vo
 
         // Save message record
         const messageId = sendResult.messageId || `msg_${Date.now()}`;
+        
+        // Get next sequence number for this conversation
+        const seqResult = await db.query(
+            `SELECT COALESCE(MAX(sequence_no), 0) + 1 as next_seq FROM messages WHERE conversation_id = $1`,
+            [conversationId]
+        );
+        const nextSeqNo = seqResult.rows[0].next_seq;
+        
         await db.query(
             `INSERT INTO messages (message_id, conversation_id, sender, text, timestamp, status, sequence_no, platform_message_id)
-             VALUES ($1, $2, 'agent', $3, CURRENT_TIMESTAMP, 'sent', 1, $4)`,
-            [messageId, conversationId, templateText, sendResult.messageId]
+             VALUES ($1, $2, 'agent', $3, CURRENT_TIMESTAMP, 'sent', $4, $5)`,
+            [messageId, conversationId, templateText, nextSeqNo, sendResult.messageId]
         );
 
         // Track template send
