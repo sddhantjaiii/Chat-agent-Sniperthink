@@ -305,24 +305,29 @@ async function processRecipient(
 
 /**
  * Process a batch of recipients for a campaign
+ * Note: getPendingRecipients atomically marks recipients as QUEUED to prevent duplicate processing
  */
 async function processCampaignBatch(campaign: Campaign): Promise<void> {
-    const pendingRecipients = await campaignService.getPendingRecipients(campaign.campaign_id, BATCH_SIZE);
+    // Atomically claim pending recipients (they become QUEUED)
+    const queuedRecipients = await campaignService.getPendingRecipients(campaign.campaign_id, BATCH_SIZE);
 
-    if (pendingRecipients.length === 0) {
-        // No more pending recipients, complete the campaign
-        await campaignService.completeCampaign(campaign.campaign_id);
-        await campaignService.syncCampaignStats(campaign.campaign_id);
-        logger.info('Campaign completed', { campaignId: campaign.campaign_id });
+    if (queuedRecipients.length === 0) {
+        // Check if campaign is truly complete (no PENDING or QUEUED left)
+        const isComplete = await campaignService.checkCampaignComplete(campaign.campaign_id);
+        if (isComplete) {
+            await campaignService.completeCampaign(campaign.campaign_id);
+            await campaignService.syncCampaignStats(campaign.campaign_id);
+            logger.info('Campaign completed', { campaignId: campaign.campaign_id });
+        }
         return;
     }
 
     logger.info('Processing campaign batch', {
         campaignId: campaign.campaign_id,
-        batchSize: pendingRecipients.length,
+        batchSize: queuedRecipients.length,
     });
 
-    for (const recipientWithContact of pendingRecipients) {
+    for (const recipientWithContact of queuedRecipients) {
         if (isShuttingDown) {
             logger.info('Worker shutting down, stopping batch processing');
             return;

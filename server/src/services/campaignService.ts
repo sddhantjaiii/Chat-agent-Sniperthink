@@ -600,23 +600,37 @@ async function createRecipientsFromContactsWithVariables(
 }
 
 /**
- * Get pending recipients for campaign
+ * Get pending recipients for campaign and atomically mark them as QUEUED
+ * This prevents duplicate processing when worker runs multiple times
  */
 export async function getPendingRecipients(
     campaignId: string,
     limit: number = campaignsConfig.batchSize
 ): Promise<Array<CampaignRecipient & { contact: Contact }>> {
+    // Use a CTE to atomically claim recipients by marking them as QUEUED
+    // FOR UPDATE SKIP LOCKED prevents race conditions
     const result = await db.query<CampaignRecipient & Contact>(
-        `SELECT cr.*, c.phone, c.name, c.email, c.company, c.tags, 
-                c.opted_out, c.is_active
-         FROM campaign_recipients cr
-         JOIN contacts c ON cr.contact_id = c.contact_id
-         WHERE cr.campaign_id = $1 
-         AND cr.status = 'PENDING'
-         AND c.is_active = true
-         AND c.opted_out = false
-         ORDER BY cr.created_at
-         LIMIT $2`,
+        `WITH claimed AS (
+            UPDATE campaign_recipients
+            SET status = 'QUEUED', queued_at = CURRENT_TIMESTAMP
+            WHERE recipient_id IN (
+                SELECT cr.recipient_id
+                FROM campaign_recipients cr
+                JOIN contacts c ON cr.contact_id = c.contact_id
+                WHERE cr.campaign_id = $1 
+                AND cr.status = 'PENDING'
+                AND c.is_active = true
+                AND c.opted_out = false
+                ORDER BY cr.created_at
+                LIMIT $2
+                FOR UPDATE OF cr SKIP LOCKED
+            )
+            RETURNING *
+        )
+        SELECT claimed.*, c.phone, c.name, c.email, c.company, c.tags, 
+               c.opted_out, c.is_active
+        FROM claimed
+        JOIN contacts c ON claimed.contact_id = c.contact_id`,
         [campaignId, limit]
     );
 
