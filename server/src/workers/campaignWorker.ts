@@ -4,11 +4,13 @@
  */
 
 import { logger } from '../utils/logger';
+import { db } from '../utils/database';
 import { campaignService } from '../services/campaignService';
 import { templateService } from '../services/templateService';
 import { contactService } from '../services/contactService';
 import { rateLimitService } from '../services/rateLimitService';
 import { sendTemplateMessage } from '../services/messageService';
+import { getOrCreateConversation } from '../services/conversationService';
 import { appEventEmitter } from '../utils/eventEmitter';
 import { campaignsConfig } from '../config';
 import type {
@@ -71,6 +73,28 @@ async function processRecipient(
             return false;
         }
 
+        // Find or create conversation for this recipient
+        const conversationResult = await getOrCreateConversation(
+            campaign.phone_number_id,
+            contact.phone
+        );
+        
+        if (!conversationResult) {
+            logger.error('Could not find or create conversation', {
+                campaignId: campaign.campaign_id,
+                phoneNumberId: campaign.phone_number_id,
+                contactPhone: contact.phone,
+            });
+            await campaignService.updateRecipientStatus(
+                recipient.recipient_id,
+                'FAILED',
+                { error_message: 'No agent configured for phone number' }
+            );
+            return false;
+        }
+
+        const conversationId = conversationResult.conversation_id;
+
         // Build variable values - PRIORITY:
         // 1. Per-recipient variable_values (from external API)
         // 2. Dashboard mapping from contact fields
@@ -116,8 +140,25 @@ async function processRecipient(
             correlationId
         );
 
+        // Build message text from template for storage
+        let templateText = template.components?.body?.text || `[Template: ${template.name}]`;
+        // Replace {{1}}, {{2}}, etc. with actual values
+        for (const [position, value] of Object.entries(variableValues)) {
+            templateText = templateText.replace(new RegExp(`\\{\\{${position}\\}\\}`, 'g'), value);
+        }
+        // Also try replacing by variable name pattern for any remaining
+        for (const templateVar of templateVariables) {
+            if (variableValues[templateVar.variable_name]) {
+                templateText = templateText.replace(
+                    new RegExp(`\\{\\{${templateVar.position}\\}\\}`, 'g'), 
+                    variableValues[templateVar.variable_name]
+                );
+            }
+        }
+
         if (result.success) {
             const sendId = `send_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+            const messageId = result.messageId || `msg_campaign_${Date.now()}`;
             
             await campaignService.updateRecipientStatus(
                 recipient.recipient_id,
@@ -126,12 +167,49 @@ async function processRecipient(
             );
             await rateLimitService.incrementUsage(campaign.phone_number_id);
             
+            // Get next sequence number and store message in messages table
+            try {
+                const seqResult = await db.query(
+                    `SELECT COALESCE(MAX(sequence_no), 0) + 1 as next_seq FROM messages WHERE conversation_id = $1`,
+                    [conversationId]
+                );
+                const nextSeqNo = seqResult.rows[0].next_seq;
+                
+                await db.query(
+                    `INSERT INTO messages (message_id, conversation_id, sender, text, timestamp, status, sequence_no, platform_message_id)
+                     VALUES ($1, $2, 'agent', $3, CURRENT_TIMESTAMP, 'sent', $4, $5)
+                     ON CONFLICT (message_id) DO NOTHING`,
+                    [messageId, conversationId, templateText, nextSeqNo, result.messageId]
+                );
+
+                // Update conversation last_message_at
+                await db.query(
+                    `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE conversation_id = $1`,
+                    [conversationId]
+                );
+
+                logger.debug('Campaign message stored in database', {
+                    correlationId,
+                    conversationId,
+                    messageId,
+                    sequenceNo: nextSeqNo,
+                });
+            } catch (msgError) {
+                logger.warn('Failed to store campaign message in messages table', {
+                    correlationId,
+                    conversationId,
+                    error: msgError instanceof Error ? msgError.message : 'Unknown error',
+                });
+                // Continue - message was sent successfully, just storage failed
+            }
+            
             // Track in template sends
             await templateService.createTemplateSend({
                 send_id: sendId,
                 template_id: template.template_id,
                 campaign_id: campaign.campaign_id,
                 customer_phone: contact.phone,
+                conversation_id: conversationId,
             });
             
             // Update status if we have platform message ID
@@ -139,10 +217,22 @@ async function processRecipient(
                 await templateService.updateTemplateSendStatus(sendId, 'SENT', result.messageId);
             }
 
+            // Update contact messaging stats
+            try {
+                await contactService.updateMessagingStats(contact.contact_id, 'sent');
+            } catch (statsError) {
+                logger.warn('Failed to update contact messaging stats', {
+                    correlationId,
+                    contactId: contact.contact_id,
+                    error: statsError instanceof Error ? statsError.message : 'Unknown error',
+                });
+            }
+
             logger.debug('Template message sent', {
                 campaignId: campaign.campaign_id,
                 contactId: contact.contact_id,
                 phone: contact.phone,
+                conversationId,
             });
 
             return true;
