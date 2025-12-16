@@ -2036,7 +2036,7 @@ export async function listCampaigns(req: Request, res: Response): Promise<void> 
             `SELECT COUNT(*) as count FROM campaigns c ${whereClause}`,
             params
         );
-        const total = parseInt(countResult.rows[0].count, 10);
+        const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
 
         // Get campaigns with template info
         const campaignsResult = await db.query<Campaign & { template_name?: string }>(
