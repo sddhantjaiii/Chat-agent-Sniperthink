@@ -736,8 +736,9 @@ async function sendInstagramMessage(
             clearTimeout(timeoutId);
             const fetchDuration = Date.now() - fetchStart;
             
-            // If Instagram Graph API fails with auth error, try Facebook Graph API fallback
-            if (!response.ok && (response.status === 401 || response.status === 403)) {
+            // If Instagram Graph API fails with auth/invalid parameter error, try Facebook Graph API fallback
+            // 400 = Invalid parameter (me endpoint not supported), 401/403 = auth errors
+            if (!response.ok && (response.status === 400 || response.status === 401 || response.status === 403)) {
                 logger.info('Instagram Graph API failed, trying Facebook Graph API fallback', {
                     correlationId,
                     statusCode: response.status
