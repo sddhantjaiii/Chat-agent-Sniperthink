@@ -1486,25 +1486,47 @@ export async function getLeadButtonActivity(customerPhone: string, userId: strin
 /**
  * Find template send by context (for linking button clicks)
  * Looks up the original template message that was sent to this customer
+ * Searches both templates.components JSONB and template_buttons table
  */
 export async function findTemplateSendForButtonClick(
     customerPhone: string,
     buttonText: string,
     userId: string
 ): Promise<{ templateSend: TemplateSend; template: Template } | null> {
-    // Find the most recent template send to this customer that has this button
-    const result = await db.query<TemplateSend & { template_id: string }>(
+    // First, try to find by template_buttons table (more reliable)
+    // This handles templates where buttons are stored in the separate table
+    let result = await db.query<TemplateSend & { template_id: string }>(
         `SELECT ts.* 
          FROM template_sends ts
          JOIN templates t ON t.template_id = ts.template_id
+         JOIN template_buttons tb ON tb.template_id = t.template_id
          WHERE ts.customer_phone = $1 
            AND t.user_id = $2
            AND ts.status IN ('SENT', 'DELIVERED', 'READ')
-           AND t.components::text LIKE $3
+           AND tb.button_text = $3
          ORDER BY ts.sent_at DESC
          LIMIT 1`,
-        [customerPhone, userId, `%"text":"${buttonText}"%`]
+        [customerPhone, userId, buttonText]
     );
+
+    // Fallback: search in templates.components JSONB (legacy/inline buttons)
+    if (result.rows.length === 0) {
+        result = await db.query<TemplateSend & { template_id: string }>(
+            `SELECT ts.* 
+             FROM template_sends ts
+             JOIN templates t ON t.template_id = ts.template_id
+             WHERE ts.customer_phone = $1 
+               AND t.user_id = $2
+               AND ts.status IN ('SENT', 'DELIVERED', 'READ')
+               AND (
+                 t.components::text LIKE $3
+                 OR t.components::text LIKE $4
+               )
+             ORDER BY ts.sent_at DESC
+             LIMIT 1`,
+            [customerPhone, userId, `%"text":"${buttonText}"%`, `%"text": "${buttonText}"%`]
+        );
+    }
 
     if (result.rows.length === 0) {
         return null;

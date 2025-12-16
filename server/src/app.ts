@@ -283,6 +283,10 @@ export class App {
     // Dashboard & Analytics
     this.app.get('/admin/dashboard', adminController.getDashboardStats);
     this.app.get('/admin/rate-limits', adminController.getRateLimitStats);
+    
+    // WhatsApp Conversation Analytics (Business-initiated limits)
+    this.app.get('/admin/conversation-analytics', adminController.getAllConversationAnalytics);
+    this.app.get('/admin/phone-numbers/:phoneNumberId/conversation-analytics', adminController.getConversationAnalytics);
 
     // Users management
     this.app.get('/admin/users', adminController.listUsers);
@@ -360,6 +364,10 @@ export class App {
     this.app.get('/api/v1/phone-numbers/:phoneNumberId', externalApiController.getPhoneNumber);
     this.app.patch('/api/v1/phone-numbers/:phoneNumberId', externalApiController.updatePhoneNumber);
     this.app.delete('/api/v1/phone-numbers/:phoneNumberId', externalApiController.deletePhoneNumber);
+    
+    // Conversation Analytics (WhatsApp business-initiated limits)
+    this.app.get('/api/v1/conversation-analytics', externalApiController.getAllConversationAnalytics);
+    this.app.get('/api/v1/phone-numbers/:phoneNumberId/conversation-analytics', externalApiController.getConversationAnalytics);
     
     // Agents
     this.app.get('/api/v1/agents', externalApiController.listAgents);

@@ -505,14 +505,29 @@ async function handleButtonClick(params: {
             });
         } else {
             // Record click without template context (orphan click)
-            // Try to find any template with this button
-            const templateResult = await db.query<{ template_id: string }>(
-                `SELECT t.template_id FROM templates t
+            // Try to find any template with this button - first check template_buttons table
+            let templateResult = await db.query<{ template_id: string }>(
+                `SELECT DISTINCT t.template_id FROM templates t
+                 JOIN template_buttons tb ON tb.template_id = t.template_id
                  WHERE t.user_id = $1 
-                   AND t.components::text LIKE $2
+                   AND tb.button_text = $2
                  LIMIT 1`,
-                [user_id, `%"text":"${buttonText}"%`]
+                [user_id, buttonText]
             );
+
+            // Fallback: search in templates.components JSONB
+            if (templateResult.rows.length === 0) {
+                templateResult = await db.query<{ template_id: string }>(
+                    `SELECT t.template_id FROM templates t
+                     WHERE t.user_id = $1 
+                       AND (
+                         t.components::text LIKE $2
+                         OR t.components::text LIKE $3
+                       )
+                     LIMIT 1`,
+                    [user_id, `%"text":"${buttonText}"%`, `%"text": "${buttonText}"%`]
+                );
+            }
 
             if (templateResult.rows.length > 0) {
                 await recordButtonClick({
@@ -558,6 +573,48 @@ async function handleButtonClick(params: {
 }
 
 /**
+ * Mark a contact as opted out when we receive error code 131050
+ * This indicates the user has blocked marketing messages from the business
+ */
+async function markContactAsOptedOut(recipientPhone: string, correlationId: string): Promise<void> {
+    try {
+        // Normalize phone number to match our storage format
+        const normalizedPhone = normalizePhoneNumber(recipientPhone);
+        
+        // Update all contacts with this phone number across all users
+        // (A phone can exist in multiple users' contact lists)
+        const result = await db.query(
+            `UPDATE contacts 
+             SET opted_out = true, opted_out_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE phone = $1 AND opted_out = false
+             RETURNING contact_id, user_id`,
+            [normalizedPhone]
+        );
+
+        if (result.rowCount && result.rowCount > 0) {
+            logger.info('📵 Contact(s) marked as opted out due to error 131050', {
+                phone: normalizedPhone,
+                contactsUpdated: result.rowCount,
+                contactIds: result.rows.map((r: { contact_id: string }) => r.contact_id),
+                correlationId,
+            });
+        } else {
+            logger.debug('No contact found to mark as opted out (may not exist in contacts table)', {
+                phone: normalizedPhone,
+                correlationId,
+            });
+        }
+    } catch (error) {
+        logger.error('Failed to mark contact as opted out', {
+            recipientPhone,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            correlationId,
+        });
+        // Don't throw - this is a non-critical operation
+    }
+}
+
+/**
  * Handle message delivery status updates from WhatsApp
  * Updates the message status and template_sends status in database
  */
@@ -572,26 +629,50 @@ async function handleMessageDeliveryStatus(
     correlationId: string
 ): Promise<void> {
     try {
-        const { id: messageId, status: deliveryStatus, errors } = status;
+        const { id: platformMessageId, status: deliveryStatus, errors } = status;
         
-        // Update message_delivery_status table (tracks full lifecycle: sent, delivered, read, failed)
-        await db.query(
-            `INSERT INTO message_delivery_status (message_id, platform_message_id, status, error_message, updated_at)
-             VALUES ($1, $1, $2, $3, CURRENT_TIMESTAMP)
-             ON CONFLICT (message_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                error_message = EXCLUDED.error_message,
-                updated_at = CURRENT_TIMESTAMP`,
-            [messageId, deliveryStatus, errors?.[0]?.message || null]
+        // First, find our internal message_id using the platform_message_id
+        // This is needed because message_delivery_status.message_id is FK to messages.message_id
+        const messageResult = await db.query<{ message_id: string }>(
+            `SELECT message_id FROM messages WHERE platform_message_id = $1`,
+            [platformMessageId]
         );
 
-        // Update messages table status only for states allowed by constraint ('sent', 'failed', 'pending')
-        // 'delivered' and 'read' are tracked in message_delivery_status table only
-        if (deliveryStatus === 'sent' || deliveryStatus === 'failed') {
+        if (messageResult.rows.length > 0) {
+            const internalMessageId = messageResult.rows[0]!.message_id;
+            
+            // Update message_delivery_status table (tracks full lifecycle: sent, delivered, read, failed)
             await db.query(
-                `UPDATE messages SET status = $1 WHERE platform_message_id = $2`,
-                [deliveryStatus, messageId]
+                `INSERT INTO message_delivery_status (message_id, platform_message_id, status, error_message, updated_at)
+                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                 ON CONFLICT (message_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    error_message = EXCLUDED.error_message,
+                    updated_at = CURRENT_TIMESTAMP`,
+                [internalMessageId, platformMessageId, deliveryStatus, errors?.[0]?.message || null]
             );
+
+            // Update messages table status only for states allowed by constraint ('sent', 'failed', 'pending')
+            // 'delivered' and 'read' are tracked in message_delivery_status table only
+            if (deliveryStatus === 'sent' || deliveryStatus === 'failed') {
+                await db.query(
+                    `UPDATE messages SET status = $1 WHERE message_id = $2`,
+                    [deliveryStatus, internalMessageId]
+                );
+            }
+            
+            logger.debug('Message delivery status updated in database', {
+                internalMessageId,
+                platformMessageId,
+                status: deliveryStatus,
+                correlationId,
+            });
+        } else {
+            logger.debug('Message not found in messages table, may be a template-only message', {
+                platformMessageId,
+                status: deliveryStatus,
+                correlationId,
+            });
         }
 
         // Update template_sends table if this is a template message
@@ -617,7 +698,7 @@ async function handleMessageDeliveryStatus(
                 updated_at = CURRENT_TIMESTAMP
              WHERE platform_message_id = $3
              RETURNING send_id, template_id`;
-            updateParams = [mappedStatus, errorMessage, messageId];
+            updateParams = [mappedStatus, errorMessage, platformMessageId];
         } else if (deliveryStatus === 'read') {
             updateQuery = `UPDATE template_sends SET 
                 status = $1,
@@ -626,7 +707,7 @@ async function handleMessageDeliveryStatus(
                 updated_at = CURRENT_TIMESTAMP
              WHERE platform_message_id = $3
              RETURNING send_id, template_id`;
-            updateParams = [mappedStatus, errorMessage, messageId];
+            updateParams = [mappedStatus, errorMessage, platformMessageId];
         } else {
             updateQuery = `UPDATE template_sends SET 
                 status = $1,
@@ -634,7 +715,7 @@ async function handleMessageDeliveryStatus(
                 updated_at = CURRENT_TIMESTAMP
              WHERE platform_message_id = $3
              RETURNING send_id, template_id`;
-            updateParams = [mappedStatus, errorMessage, messageId];
+            updateParams = [mappedStatus, errorMessage, platformMessageId];
         }
 
         const templateSendUpdate = await db.query(updateQuery, updateParams);
@@ -648,7 +729,7 @@ async function handleMessageDeliveryStatus(
             });
         }
 
-        // Log specific error codes for debugging
+        // Log specific error codes for debugging and auto-update contact opt-out status
         if (errors && errors.length > 0 && errors[0]) {
             const errorCode = errors[0].code;
             let errorHint = '';
@@ -665,27 +746,24 @@ async function handleMessageDeliveryStatus(
                     break;
                 case 131050:
                     errorHint = '❌ USER OPTED OUT: User has blocked marketing messages from your business.';
+                    // Auto-update contact as opted out in database
+                    await markContactAsOptedOut(status.recipient_id, correlationId);
                     break;
             }
             
             if (errorHint) {
                 logger.warn(errorHint, {
                     correlationId,
-                    messageId,
+                    platformMessageId,
+                    recipientPhone: status.recipient_id,
                     errorCode,
                     errorDetails: errors[0],
                 });
             }
         }
-
-        logger.debug('Message delivery status updated in database', {
-            messageId,
-            status: deliveryStatus,
-            correlationId,
-        });
     } catch (error) {
         logger.error('Failed to handle message delivery status', {
-            messageId: status.id,
+            platformMessageId: status.id,
             status: status.status,
             error: error instanceof Error ? error.message : 'Unknown error',
             correlationId,

@@ -133,6 +133,443 @@ export async function getRateLimitStats(req: Request, res: Response): Promise<vo
     }
 }
 
+/**
+ * WhatsApp conversation analytics response from Meta API
+ */
+interface WhatsAppConversationAnalytics {
+    business_initiated: number;
+    user_initiated: number;
+    referral_conversion: number;
+    start: number;
+    end: number;
+}
+
+/**
+ * Meta Graph API analytics response structure
+ */
+interface MetaAnalyticsResponse {
+    analytics?: {
+        data_points?: WhatsAppConversationAnalytics[];
+        phone_numbers?: string[];
+    };
+    id?: string;
+    error?: {
+        message: string;
+        type: string;
+        code: number;
+    };
+}
+
+/**
+ * Tier limits for WhatsApp Business API
+ */
+const WHATSAPP_TIER_LIMITS: Record<string, number> = {
+    'TIER_1': 1000,
+    'TIER_2': 10000,
+    'TIER_3': 100000,
+    'TIER_4': Infinity,
+    'UNLIMITED': Infinity,
+};
+
+/**
+ * GET /admin/phone-numbers/:phoneNumberId/conversation-analytics
+ * Get WhatsApp business-initiated conversation usage and remaining limit
+ * 
+ * Queries Meta's Graph API to get real-time conversation analytics
+ * for a specific phone number in a rolling 24-hour period.
+ */
+export async function getConversationAnalytics(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { phoneNumberId } = req.params;
+
+    try {
+        // Get phone number details including WABA ID and access token
+        const phoneResult = await db.query<{
+            id: string;
+            meta_phone_number_id: string;
+            waba_id: string | null;
+            access_token: string;
+            platform: string;
+            display_name: string;
+            daily_message_limit: number | null;
+            tier: string | null;
+        }>(
+            `SELECT id, meta_phone_number_id, waba_id, access_token, platform, display_name, daily_message_limit, tier
+             FROM phone_numbers WHERE id = $1`,
+            [phoneNumberId]
+        );
+
+        if (phoneResult.rows.length === 0) {
+            res.status(404).json({
+                error: 'Not Found',
+                message: 'Phone number not found',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        const phoneNumber = phoneResult.rows[0]!;
+
+        // Only WhatsApp phone numbers have conversation analytics
+        if (phoneNumber.platform !== 'whatsapp') {
+            res.status(400).json({
+                error: 'Bad Request',
+                message: 'Conversation analytics are only available for WhatsApp phone numbers',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Check if WABA ID is configured
+        if (!phoneNumber.waba_id) {
+            res.status(400).json({
+                error: 'Configuration Error',
+                message: 'WABA ID (WhatsApp Business Account ID) is not configured for this phone number. Please update the phone number with the WABA ID.',
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Calculate rolling 24-hour window (Unix timestamps)
+        const now = new Date();
+        const end = Math.floor(now.getTime() / 1000);
+        const start = end - (24 * 60 * 60); // 24 hours ago
+
+        // Query Meta Graph API for conversation analytics
+        const analyticsUrl = new URL(`https://graph.facebook.com/v24.0/${phoneNumber.waba_id}`);
+        analyticsUrl.searchParams.set('fields', 
+            `analytics.start(${start}).end(${end}).granularity(DAY).phone_numbers([${phoneNumber.meta_phone_number_id}]).metric_types([CONVERSATION])`
+        );
+
+        logger.info('Fetching WhatsApp conversation analytics from Meta', {
+            correlationId,
+            phoneNumberId,
+            wabaId: phoneNumber.waba_id,
+            metaPhoneNumberId: phoneNumber.meta_phone_number_id,
+            startTimestamp: start,
+            endTimestamp: end,
+        });
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+        try {
+            const response = await fetch(analyticsUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${phoneNumber.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            const responseText = await response.text();
+            let data: MetaAnalyticsResponse;
+            
+            try {
+                data = JSON.parse(responseText);
+            } catch {
+                logger.error('Failed to parse Meta analytics response', {
+                    correlationId,
+                    responseText: responseText.substring(0, 500),
+                });
+                throw new Error('Invalid response from Meta API');
+            }
+
+            if (!response.ok || data.error) {
+                logger.error('Meta Analytics API error', {
+                    correlationId,
+                    statusCode: response.status,
+                    error: data.error,
+                });
+
+                res.status(response.status === 401 ? 401 : 502).json({
+                    error: response.status === 401 ? 'Unauthorized' : 'Meta API Error',
+                    message: data.error?.message || 'Failed to fetch analytics from Meta',
+                    meta_error_code: data.error?.code,
+                    timestamp: new Date().toISOString(),
+                    correlationId,
+                });
+                return;
+            }
+
+            // Extract analytics data
+            const dataPoints = data.analytics?.data_points || [];
+            const latestData = dataPoints[dataPoints.length - 1] || {
+                business_initiated: 0,
+                user_initiated: 0,
+                referral_conversion: 0,
+                start,
+                end,
+            };
+
+            // Get tier limit
+            const tier = phoneNumber.tier || 'TIER_1';
+            const tierLimit = phoneNumber.daily_message_limit || WHATSAPP_TIER_LIMITS[tier] || 1000;
+            const remaining = Math.max(0, tierLimit - latestData.business_initiated);
+
+            const analyticsResponse = {
+                phone_number_id: phoneNumber.id,
+                meta_phone_number_id: phoneNumber.meta_phone_number_id,
+                waba_id: phoneNumber.waba_id,
+                display_name: phoneNumber.display_name,
+                platform: phoneNumber.platform,
+                tier,
+                tier_limit: tierLimit === Infinity ? 'unlimited' : tierLimit,
+                period: {
+                    start: new Date(start * 1000).toISOString(),
+                    end: new Date(end * 1000).toISOString(),
+                    duration_hours: 24,
+                },
+                conversations: {
+                    business_initiated: latestData.business_initiated,
+                    user_initiated: latestData.user_initiated,
+                    referral_conversion: latestData.referral_conversion || 0,
+                    total: latestData.business_initiated + latestData.user_initiated,
+                },
+                limits: {
+                    business_initiated_limit: tierLimit === Infinity ? 'unlimited' : tierLimit,
+                    business_initiated_used: latestData.business_initiated,
+                    business_initiated_remaining: tierLimit === Infinity ? 'unlimited' : remaining,
+                    usage_percentage: tierLimit === Infinity ? 0 : Math.round((latestData.business_initiated / tierLimit) * 100),
+                },
+                raw_data_points: dataPoints,
+            };
+
+            logger.info('WhatsApp conversation analytics fetched successfully', {
+                correlationId,
+                phoneNumberId,
+                businessInitiated: latestData.business_initiated,
+                remaining,
+                tier,
+            });
+
+            res.status(200).json({
+                success: true,
+                data: analyticsResponse,
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+
+        } catch (fetchError) {
+            clearTimeout(timeoutId);
+
+            if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+                logger.error('Meta Analytics API timeout', { correlationId, phoneNumberId });
+                res.status(504).json({
+                    error: 'Gateway Timeout',
+                    message: 'Meta API request timed out after 15 seconds',
+                    timestamp: new Date().toISOString(),
+                    correlationId,
+                });
+                return;
+            }
+
+            throw fetchError;
+        }
+
+    } catch (error) {
+        logger.error('Failed to get conversation analytics', { correlationId, phoneNumberId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to get conversation analytics',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /admin/conversation-analytics
+ * Get conversation analytics for all WhatsApp phone numbers
+ * 
+ * Returns aggregated and per-phone-number conversation usage
+ */
+export async function getAllConversationAnalytics(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const { userId } = req.query;
+
+    try {
+        // Get all WhatsApp phone numbers (optionally filtered by user)
+        let query = `
+            SELECT id, meta_phone_number_id, waba_id, access_token, platform, display_name, 
+                   daily_message_limit, tier, user_id
+            FROM phone_numbers 
+            WHERE platform = 'whatsapp' AND waba_id IS NOT NULL
+        `;
+        const params: string[] = [];
+
+        if (userId) {
+            query += ' AND user_id = $1';
+            params.push(userId as string);
+        }
+
+        query += ' ORDER BY created_at DESC';
+
+        const phoneResult = await db.query<{
+            id: string;
+            meta_phone_number_id: string;
+            waba_id: string;
+            access_token: string;
+            platform: string;
+            display_name: string;
+            daily_message_limit: number | null;
+            tier: string | null;
+            user_id: string;
+        }>(query, params);
+
+        if (phoneResult.rows.length === 0) {
+            res.status(200).json({
+                success: true,
+                data: {
+                    phone_numbers: [],
+                    summary: {
+                        total_phone_numbers: 0,
+                        total_business_initiated: 0,
+                        total_user_initiated: 0,
+                    },
+                },
+                timestamp: new Date().toISOString(),
+                correlationId,
+            });
+            return;
+        }
+
+        // Calculate rolling 24-hour window
+        const now = new Date();
+        const end = Math.floor(now.getTime() / 1000);
+        const start = end - (24 * 60 * 60);
+
+        // Fetch analytics for each phone number in parallel (with rate limiting)
+        const analyticsResults = await Promise.allSettled(
+            phoneResult.rows.map(async (phone) => {
+                const analyticsUrl = new URL(`https://graph.facebook.com/v24.0/${phone.waba_id}`);
+                analyticsUrl.searchParams.set('fields',
+                    `analytics.start(${start}).end(${end}).granularity(DAY).phone_numbers([${phone.meta_phone_number_id}]).metric_types([CONVERSATION])`
+                );
+
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                try {
+                    const response = await fetch(analyticsUrl.toString(), {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${phone.access_token}`,
+                        },
+                        signal: controller.signal,
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (!response.ok) {
+                        return {
+                            phone_number_id: phone.id,
+                            display_name: phone.display_name,
+                            user_id: phone.user_id,
+                            error: `Meta API returned ${response.status}`,
+                            status: 'error' as const,
+                        };
+                    }
+
+                    const data = (await response.json()) as MetaAnalyticsResponse;
+                    const dataPoints = data.analytics?.data_points || [];
+                    const latestData = dataPoints[dataPoints.length - 1] || {
+                        business_initiated: 0,
+                        user_initiated: 0,
+                    };
+
+                    const tier = phone.tier || 'TIER_1';
+                    const tierLimit = phone.daily_message_limit || WHATSAPP_TIER_LIMITS[tier] || 1000;
+                    const remaining = Math.max(0, tierLimit - latestData.business_initiated);
+
+                    return {
+                        phone_number_id: phone.id,
+                        meta_phone_number_id: phone.meta_phone_number_id,
+                        display_name: phone.display_name,
+                        user_id: phone.user_id,
+                        tier,
+                        tier_limit: tierLimit === Infinity ? 'unlimited' : tierLimit,
+                        business_initiated: latestData.business_initiated,
+                        user_initiated: latestData.user_initiated,
+                        remaining: tierLimit === Infinity ? 'unlimited' : remaining,
+                        usage_percentage: tierLimit === Infinity ? 0 : Math.round((latestData.business_initiated / tierLimit) * 100),
+                        status: 'success' as const,
+                    };
+                } catch (err) {
+                    clearTimeout(timeoutId);
+                    return {
+                        phone_number_id: phone.id,
+                        display_name: phone.display_name,
+                        user_id: phone.user_id,
+                        error: err instanceof Error ? err.message : 'Unknown error',
+                        status: 'error' as const,
+                    };
+                }
+            })
+        );
+
+        // Process results
+        const phoneAnalytics = analyticsResults.map((result, index) => {
+            if (result.status === 'fulfilled') {
+                return result.value;
+            }
+            const phone = phoneResult.rows[index]!;
+            return {
+                phone_number_id: phone.id,
+                display_name: phone.display_name,
+                user_id: phone.user_id,
+                error: result.reason?.message || 'Failed to fetch',
+                status: 'error' as const,
+            };
+        });
+
+        // Calculate summary
+        const successfulResults = phoneAnalytics.filter(p => p.status === 'success');
+        const summary = {
+            total_phone_numbers: phoneResult.rows.length,
+            successful_fetches: successfulResults.length,
+            failed_fetches: phoneResult.rows.length - successfulResults.length,
+            total_business_initiated: successfulResults.reduce((sum, p) => sum + ((p as any).business_initiated || 0), 0),
+            total_user_initiated: successfulResults.reduce((sum, p) => sum + ((p as any).user_initiated || 0), 0),
+            period: {
+                start: new Date(start * 1000).toISOString(),
+                end: new Date(end * 1000).toISOString(),
+            },
+        };
+
+        logger.info('All conversation analytics fetched', {
+            correlationId,
+            totalPhones: phoneResult.rows.length,
+            successful: successfulResults.length,
+        });
+
+        res.status(200).json({
+            success: true,
+            data: {
+                phone_numbers: phoneAnalytics,
+                summary,
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+
+    } catch (error) {
+        logger.error('Failed to get all conversation analytics', { correlationId, error });
+        res.status(500).json({
+            error: 'Internal Server Error',
+            message: 'Failed to get conversation analytics',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
 // =====================================
 // Users
 // =====================================
@@ -2164,6 +2601,9 @@ export const adminController = {
     // Dashboard
     getDashboardStats,
     getRateLimitStats,
+    // Conversation Analytics (WhatsApp)
+    getConversationAnalytics,
+    getAllConversationAnalytics,
     // Users
     listUsers,
     getUser,
