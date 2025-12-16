@@ -38,12 +38,14 @@ interface ProcessedMessage {
 
 /**
  * Interface for template status update webhook
+ * Meta sends these fields directly in change.value when field is 'message_template_status_update'
  */
 interface TemplateStatusUpdate {
     event: 'APPROVED' | 'REJECTED' | 'PENDING_DELETION' | 'FLAGGED' | 'DISABLED' | 'REINSTATED' | 'PENDING';
     message_template_id: number;
     message_template_name: string;
     message_template_language: string;
+    message_template_category?: string;
     reason?: string;
 }
 
@@ -711,8 +713,10 @@ async function handleTemplateStatusUpdate(
                     continue;
                 }
 
-                const statusUpdate = change.value.message_template_status_update;
-                if (!statusUpdate) continue;
+                // Meta sends template status data directly in change.value when field is message_template_status_update
+                // NOT in change.value.message_template_status_update
+                const statusUpdate = (change.value as unknown as TemplateStatusUpdate);
+                if (!statusUpdate || !statusUpdate.event) continue;
 
                 // Map Meta events to our internal status
                 const statusMap: Record<string, string> = {
@@ -739,10 +743,12 @@ async function handleTemplateStatusUpdate(
                 });
 
                 // Update template in database using meta_template_id
+                // Also set approved_at timestamp when status becomes APPROVED
                 const result = await db.query(
                     `UPDATE templates 
                      SET status = $1, 
                          rejection_reason = $2,
+                         approved_at = CASE WHEN $1 = 'APPROVED' THEN CURRENT_TIMESTAMP ELSE approved_at END,
                          updated_at = CURRENT_TIMESTAMP
                      WHERE meta_template_id = $3`,
                     [
@@ -775,6 +781,7 @@ async function handleTemplateStatusUpdate(
                              SET status = $1, 
                                  rejection_reason = $2,
                                  meta_template_id = $3,
+                                 approved_at = CASE WHEN $1 = 'APPROVED' THEN CURRENT_TIMESTAMP ELSE approved_at END,
                                  updated_at = CURRENT_TIMESTAMP
                              WHERE name = $4 
                                AND phone_number_id = $5
