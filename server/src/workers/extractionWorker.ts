@@ -481,14 +481,6 @@ class ExtractionWorker {
       engagement_health: parsed.engagement_health,
       engagement_score: parsed.engagement_score,
       
-      // CTA tracking
-      cta_pricing_clicked: parsed.cta_pricing_clicked,
-      cta_demo_clicked: parsed.cta_demo_clicked,
-      cta_followup_clicked: parsed.cta_followup_clicked,
-      cta_sample_clicked: parsed.cta_sample_clicked,
-      cta_website_clicked: parsed.cta_website_clicked,
-      cta_escalated_to_human: parsed.cta_escalated_to_human,
-      
       // Overall scoring
       total_score: parsed.total_score,
       lead_status_tag: parsed.lead_status_tag,
@@ -503,7 +495,12 @@ class ExtractionWorker {
       name: parsed.extraction?.name || null,
       email: parsed.extraction?.email_address || null,
       company: parsed.extraction?.company_name || null,
-      smart_notification: parsed.extraction?.smartnotification || null
+      smart_notification: parsed.extraction?.smartnotification || null,
+      
+      // New fields from extraction sub-object
+      requirements: parsed.extraction?.requirements || null,
+      custom_cta: parsed.extraction?.['Custom CTA'] || null,
+      in_detail_summary: parsed.extraction?.['In detail summary'] || null
     };
 
     logger.debug('Mapped extraction data', { extractionData });

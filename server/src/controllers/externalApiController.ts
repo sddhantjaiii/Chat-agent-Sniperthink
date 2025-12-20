@@ -17,6 +17,10 @@
  * - GET    /api/v1/button-clicks                       - List all button clicks
  * - GET    /api/v1/leads/:customerPhone/button-activity - Get lead's button activity
  * 
+ * Extractions / Lead Intelligence:
+ * - GET    /api/v1/extractions                  - Full extraction data by user + phone number
+ * - GET    /api/v1/extractions/summaries        - Only in_detail_summary by user + phone number
+ * 
  * Messaging:
  * - GET  /api/v1/phone-numbers           - List phone numbers for a user
  * - POST /api/v1/send                    - Send single template message
@@ -2845,6 +2849,9 @@ export async function getCampaignStatus(req: Request, res: Response): Promise<vo
 
         // Get recipient stats
         const stats = await campaignService.getCampaignRecipientStats(campaignId);
+        
+        // Get recipients with contact details (phone numbers)
+        const recipients = await campaignService.getCampaignRecipientsWithContacts(campaignId);
 
         logger.info('Campaign status retrieved', { correlationId, campaignId });
 
@@ -2865,6 +2872,15 @@ export async function getCampaignStatus(req: Request, res: Response): Promise<vo
                 started_at: campaign.started_at,
                 completed_at: campaign.completed_at,
                 recipient_stats: stats,
+                recipients: recipients.map(r => ({
+                    recipient_id: r.recipient_id,
+                    phone: r.phone,
+                    status: r.status,
+                    sent_at: r.sent_at,
+                    delivered_at: r.delivered_at,
+                    read_at: r.read_at,
+                    error_message: r.error_message,
+                })),
             },
             timestamp: new Date().toISOString(),
             correlationId,
@@ -3449,6 +3465,304 @@ function generateWebchatEmbedCode(webchat_id: string, name: string, baseUrl: str
 -->`;
 }
 
+// =====================================
+// EXTRACTION / LEAD INTELLIGENCE APIs
+// =====================================
+
+/**
+ * GET /api/v1/extractions/summaries
+ * Get only in_detail_summary for extractions by customer phone number
+ * 
+ * Query params:
+ * - customer_phone (required): The customer/lead phone number (e.g., +918979556941)
+ * - latest_only (optional): Only return latest extraction per conversation (default: true)
+ * - limit (optional): Max results (default: 50, max: 100)
+ * - offset (optional): Pagination offset
+ */
+async function getExtractionSummaries(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const userId = req.headers['x-user-id'] as string;
+    const { customer_phone, latest_only, limit, offset } = req.query;
+
+    if (!userId) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'x-user-id header is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (!customer_phone) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'customer_phone query parameter is required (e.g., +918979556941)',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const queryLimit = Math.min(parseInt(limit as string) || 50, 100);
+        const queryOffset = parseInt(offset as string) || 0;
+        const latestOnly = latest_only !== 'false'; // default true
+
+        let query = `
+            SELECT 
+                e.extraction_id,
+                e.conversation_id,
+                e.customer_phone,
+                e.in_detail_summary,
+                e.smart_notification,
+                e.lead_status_tag,
+                e.total_score,
+                e.extracted_at,
+                e.is_latest,
+                c.is_active as conversation_active
+            FROM extractions e
+            JOIN conversations c ON e.conversation_id = c.conversation_id
+            WHERE e.user_id = $1 AND e.customer_phone = $2
+        `;
+
+        const queryParams: any[] = [userId, customer_phone];
+        let paramIndex = 3;
+
+        if (latestOnly) {
+            query += ` AND e.is_latest = true`;
+        }
+
+        query += ` ORDER BY e.extracted_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        queryParams.push(queryLimit, queryOffset);
+
+        const result = await db.query(query, queryParams);
+
+        // Get total count
+        let countQuery = `
+            SELECT COUNT(*) as total
+            FROM extractions e
+            WHERE e.user_id = $1 AND e.customer_phone = $2
+        `;
+        const countParams: any[] = [userId, customer_phone];
+        
+        if (latestOnly) {
+            countQuery += ` AND e.is_latest = true`;
+        }
+
+        const countResult = await db.query(countQuery, countParams);
+        const total = parseInt(countResult.rows[0].total);
+
+        logger.info('Extraction summaries retrieved', {
+            correlationId,
+            userId,
+            customerPhone: customer_phone as string,
+            count: result.rows.length,
+            total
+        });
+
+        res.status(200).json({
+            success: true,
+            data: result.rows,
+            pagination: {
+                total,
+                limit: queryLimit,
+                offset: queryOffset,
+                hasMore: queryOffset + result.rows.length < total
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to get extraction summaries', { correlationId, userId, error });
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: 'Failed to retrieve extraction summaries',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
+/**
+ * GET /api/v1/extractions
+ * Get full extraction data for a specific customer phone number
+ * 
+ * Query params:
+ * - customer_phone (required): The customer/lead phone number (e.g., +918979556941)
+ * - lead_status (optional): Filter by lead status (Hot, Warm, Cold)
+ * - min_score (optional): Minimum total score filter
+ * - latest_only (optional): Only return latest extraction per conversation (default: true)
+ * - limit (optional): Max results (default: 50, max: 100)
+ * - offset (optional): Pagination offset
+ */
+async function getExtractions(req: Request, res: Response): Promise<void> {
+    const correlationId = getCorrelationId(req);
+    const userId = req.headers['x-user-id'] as string;
+    const { customer_phone, lead_status, min_score, latest_only, limit, offset } = req.query;
+
+    if (!userId) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'x-user-id header is required',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    if (!customer_phone) {
+        res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'customer_phone query parameter is required (e.g., +918979556941)',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+        return;
+    }
+
+    try {
+        const queryLimit = Math.min(parseInt(limit as string) || 50, 100);
+        const queryOffset = parseInt(offset as string) || 0;
+        const latestOnly = latest_only !== 'false'; // default true
+
+        let query = `
+            SELECT 
+                e.extraction_id,
+                e.conversation_id,
+                e.user_id,
+                e.customer_phone,
+                e.extracted_at,
+                e.is_latest,
+                e.message_count_at_extraction,
+                e.name,
+                e.email,
+                e.company,
+                e.intent_level,
+                e.intent_score,
+                e.urgency_level,
+                e.urgency_score,
+                e.budget_constraint,
+                e.budget_score,
+                e.fit_alignment,
+                e.fit_score,
+                e.engagement_health,
+                e.engagement_score,
+                e.total_score,
+                e.lead_status_tag,
+                e.demo_book_datetime,
+                e.reasoning,
+                e.smart_notification,
+                e.requirements,
+                e.custom_cta,
+                e.in_detail_summary,
+                e.created_at,
+                e.updated_at,
+                c.agent_id,
+                c.is_active as conversation_active,
+                a.name as agent_name,
+                a.phone_number_id,
+                pn.platform,
+                pn.display_name as phone_display_name
+            FROM extractions e
+            JOIN conversations c ON e.conversation_id = c.conversation_id
+            JOIN agents a ON c.agent_id = a.agent_id
+            JOIN phone_numbers pn ON a.phone_number_id = pn.id
+            WHERE e.user_id = $1 AND e.customer_phone = $2
+        `;
+
+        const queryParams: any[] = [userId, customer_phone];
+        let paramIndex = 3;
+
+        if (latestOnly) {
+            query += ` AND e.is_latest = true`;
+        }
+
+        if (lead_status) {
+            query += ` AND e.lead_status_tag = $${paramIndex}`;
+            queryParams.push(lead_status);
+            paramIndex++;
+        }
+
+        if (min_score) {
+            const minScoreNum = parseInt(min_score as string, 10);
+            if (!isNaN(minScoreNum)) {
+                query += ` AND e.total_score >= $${paramIndex}`;
+                queryParams.push(minScoreNum);
+                paramIndex++;
+            }
+        }
+
+        query += ` ORDER BY e.extracted_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        queryParams.push(queryLimit, queryOffset);
+
+        const result = await db.query(query, queryParams);
+
+        // Get total count
+        let countQuery = `
+            SELECT COUNT(*) as total
+            FROM extractions e
+            WHERE e.user_id = $1 AND e.customer_phone = $2
+        `;
+        const countParams: any[] = [userId, customer_phone];
+        let countParamIndex = 3;
+        
+        if (latestOnly) {
+            countQuery += ` AND e.is_latest = true`;
+        }
+        if (lead_status) {
+            countQuery += ` AND e.lead_status_tag = $${countParamIndex}`;
+            countParams.push(lead_status);
+            countParamIndex++;
+        }
+        if (min_score) {
+            const minScoreNum = parseInt(min_score as string, 10);
+            if (!isNaN(minScoreNum)) {
+                countQuery += ` AND e.total_score >= $${countParamIndex}`;
+                countParams.push(minScoreNum);
+            }
+        }
+
+        const countResult = await db.query(countQuery, countParams);
+        const total = parseInt(countResult.rows[0].total);
+
+        logger.info('Full extractions retrieved', {
+            correlationId,
+            userId,
+            customerPhone: customer_phone as string,
+            count: result.rows.length,
+            total
+        });
+
+        res.status(200).json({
+            success: true,
+            data: result.rows,
+            pagination: {
+                total,
+                limit: queryLimit,
+                offset: queryOffset,
+                hasMore: queryOffset + result.rows.length < total
+            },
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    } catch (error) {
+        logger.error('Failed to get extractions', { correlationId, userId, error });
+        res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: 'Failed to retrieve extractions',
+            timestamp: new Date().toISOString(),
+            correlationId,
+        });
+    }
+}
+
 // Export controller
 export const externalApiController = {
     // Users
@@ -3501,4 +3815,8 @@ export const externalApiController = {
     listWebchatChannels,
     getWebchatEmbed,
     deleteWebchatChannel,
+    
+    // Extractions / Lead Intelligence
+    getExtractions,
+    getExtractionSummaries,
 };

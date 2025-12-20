@@ -128,7 +128,6 @@ Lead scoring with history tracking. Supports multiple extractions per conversati
 | `name` | VARCHAR(255) | Contact name |
 | `email` | VARCHAR(255) | Contact email |
 | `company` | VARCHAR(255) | Company name |
-| `intent` | TEXT | Intent description |
 | `intent_level` | VARCHAR(20) | CHECK IN ('Low', 'Medium', 'High') |
 | `intent_score` | INTEGER | CHECK 1-3 |
 | `urgency_level` | VARCHAR(20) | CHECK IN ('Low', 'Medium', 'High') |
@@ -139,18 +138,14 @@ Lead scoring with history tracking. Supports multiple extractions per conversati
 | `fit_score` | INTEGER | CHECK 1-3 |
 | `engagement_health` | VARCHAR(20) | CHECK IN ('Low', 'Medium', 'High') |
 | `engagement_score` | INTEGER | CHECK 1-3 |
-| `cta_pricing_clicked` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `cta_demo_clicked` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `cta_followup_clicked` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `cta_sample_clicked` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `cta_website_clicked` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `cta_escalated_to_human` | VARCHAR(10) | CHECK IN ('Yes', 'No') |
-| `total_score` | INTEGER | CHECK 5-15 |
+| `total_score` | INTEGER | Sum of all scores (5-15) |
 | `lead_status_tag` | VARCHAR(20) | CHECK IN ('Hot', 'Warm', 'Cold') |
 | `demo_book_datetime` | TIMESTAMP | |
-| `reasoning` | JSONB | Structured reasoning for scores |
-| `smart_notification` | TEXT | Human-readable summary |
-| `notes` | TEXT | |
+| `reasoning` | JSONB | `{ intent, urgency, budget, fit, engagement, cta_behavior }` |
+| `smart_notification` | TEXT | 4-5 word summary |
+| `requirements` | TEXT | Key requirements from conversation |
+| `custom_cta` | TEXT | Comma-separated custom CTAs |
+| `in_detail_summary` | TEXT | Detailed summary of conversation |
 | `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
 | `updated_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
 

@@ -55,6 +55,8 @@ Lead extraction runs asynchronously via `extractionWorker.ts` after conversation
 - Stores in `extractions` table linked to `conversation_id`
 - Score fields: `intent_score`, `urgency_score`, `budget_score`, `fit_score`, `engagement_score` (integers 1-3)
 - Level fields use strings: `"Low"`, `"Medium"`, `"High"`
+- New extraction fields: `requirements`, `custom_cta`, `in_detail_summary`
+- `reasoning` JSONB structure: `{ intent, urgency, budget, fit, engagement, cta_behavior }`
 
 ### OpenAI Responses API
 We use the **Responses API** (not Chat Completions). See `openaiService.ts`:

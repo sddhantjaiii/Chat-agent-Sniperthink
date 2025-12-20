@@ -96,18 +96,32 @@ class ExtractionService {
       }
     });
 
-    // Validate CTA fields (Yes, No)
-    const ctaFields = [
-      'cta_pricing_clicked', 'cta_demo_clicked', 'cta_followup_clicked',
-      'cta_sample_clicked', 'cta_website_clicked', 'cta_escalated_to_human'
-    ];
-    ctaFields.forEach(field => {
-      if (data[field] !== undefined && data[field] !== null) {
-        if (typeof data[field] === 'string') {
-          (validatedData as any)[field] = data[field].trim();
-        }
+    // Validate custom_cta (comma-separated string)
+    if (data.custom_cta !== undefined && data.custom_cta !== null) {
+      if (typeof data.custom_cta === 'string') {
+        validatedData.custom_cta = data.custom_cta.trim();
+      } else {
+        errors.push('custom_cta must be a string');
       }
-    });
+    }
+
+    // Validate requirements
+    if (data.requirements !== undefined && data.requirements !== null) {
+      if (typeof data.requirements === 'string') {
+        validatedData.requirements = data.requirements.trim();
+      } else {
+        errors.push('requirements must be a string');
+      }
+    }
+
+    // Validate in_detail_summary
+    if (data.in_detail_summary !== undefined && data.in_detail_summary !== null) {
+      if (typeof data.in_detail_summary === 'string') {
+        validatedData.in_detail_summary = data.in_detail_summary.trim();
+      } else {
+        errors.push('in_detail_summary must be a string');
+      }
+    }
 
     // Validate total_score
     if (data.total_score !== undefined && data.total_score !== null) {

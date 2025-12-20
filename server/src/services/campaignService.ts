@@ -736,6 +736,49 @@ export async function getRecipientByContactAndCampaign(
 }
 
 /**
+ * Get all recipients for a campaign with contact details (phone)
+ */
+export async function getCampaignRecipientsWithContacts(
+    campaignId: string
+): Promise<Array<{
+    recipient_id: string;
+    contact_id: string;
+    phone: string;
+    status: CampaignRecipientStatus;
+    sent_at: Date | null;
+    delivered_at: Date | null;
+    read_at: Date | null;
+    error_message: string | null;
+}>> {
+    const result = await db.query<{
+        recipient_id: string;
+        contact_id: string;
+        phone: string;
+        status: CampaignRecipientStatus;
+        sent_at: Date | null;
+        delivered_at: Date | null;
+        read_at: Date | null;
+        error_message: string | null;
+    }>(
+        `SELECT 
+            cr.recipient_id,
+            cr.contact_id,
+            c.phone,
+            cr.status,
+            cr.sent_at,
+            cr.delivered_at,
+            cr.read_at,
+            cr.error_message
+         FROM campaign_recipients cr
+         JOIN contacts c ON cr.contact_id = c.contact_id
+         WHERE cr.campaign_id = $1
+         ORDER BY cr.created_at`,
+        [campaignId]
+    );
+    return result.rows;
+}
+
+/**
  * Get recipient stats for campaign
  */
 export async function getRecipientStats(campaignId: string): Promise<{
@@ -838,6 +881,7 @@ export const campaignService = {
     getRecipientByContactAndCampaign,
     getRecipientStats,
     getCampaignRecipientStats: getRecipientStats, // Alias for external API
+    getCampaignRecipientsWithContacts,
     syncCampaignStats,
     checkCampaignComplete,
 };

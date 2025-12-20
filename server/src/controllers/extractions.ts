@@ -36,7 +36,7 @@ export class ExtractionsController {
         orderDirection: (orderDirection as 'ASC' | 'DESC') || 'DESC'
       };
 
-      // Build the query based on filters (Migration 008 schema)
+      // Build the query based on filters (Migration 032 schema)
       let query = `
         SELECT 
           e.extraction_id,
@@ -49,7 +49,6 @@ export class ExtractionsController {
           e.name,
           e.email,
           e.company,
-          e.intent,
           e.intent_level,
           e.intent_score,
           e.urgency_level,
@@ -60,14 +59,14 @@ export class ExtractionsController {
           e.fit_score,
           e.engagement_health,
           e.engagement_score,
-          e.cta_pricing_clicked,
-          e.cta_demo_clicked,
-          e.cta_followup_clicked,
-          e.cta_sample_clicked,
-          e.cta_website_clicked,
-          e.cta_escalated_to_human,
           e.total_score,
-          e.notes,
+          e.lead_status_tag,
+          e.demo_book_datetime,
+          e.reasoning,
+          e.smart_notification,
+          e.requirements,
+          e.custom_cta,
+          e.in_detail_summary,
           e.created_at,
           e.updated_at,
           c.agent_id,
@@ -115,7 +114,7 @@ export class ExtractionsController {
       }
 
       if (has_demo === 'true') {
-        query += ` AND e.cta_demo_clicked = 'Yes'`;
+        query += ` AND e.demo_book_datetime IS NOT NULL`;
       }
 
       if (min_urgency) {
@@ -179,7 +178,7 @@ export class ExtractionsController {
       }
 
       if (has_demo === 'true') {
-        countQuery += ` AND e.cta_demo_clicked = 'Yes'`;
+        countQuery += ` AND e.demo_book_datetime IS NOT NULL`;
       }
 
       if (min_urgency) {
@@ -262,7 +261,6 @@ export class ExtractionsController {
           e.name,
           e.email,
           e.company,
-          e.intent,
           e.intent_level,
           e.intent_score,
           e.urgency_level,
@@ -273,14 +271,14 @@ export class ExtractionsController {
           e.fit_score,
           e.engagement_health,
           e.engagement_score,
-          e.cta_pricing_clicked,
-          e.cta_demo_clicked,
-          e.cta_followup_clicked,
-          e.cta_sample_clicked,
-          e.cta_website_clicked,
-          e.cta_escalated_to_human,
           e.total_score,
-          e.notes,
+          e.lead_status_tag,
+          e.demo_book_datetime,
+          e.reasoning,
+          e.smart_notification,
+          e.requirements,
+          e.custom_cta,
+          e.in_detail_summary,
           e.created_at,
           e.updated_at,
           c.agent_id,
@@ -544,7 +542,6 @@ export class ExtractionsController {
           e.name,
           e.email,
           e.company,
-          e.intent,
           e.intent_level,
           e.intent_score,
           e.urgency_level,
@@ -555,14 +552,14 @@ export class ExtractionsController {
           e.fit_score,
           e.engagement_health,
           e.engagement_score,
-          e.cta_pricing_clicked,
-          e.cta_demo_clicked,
-          e.cta_followup_clicked,
-          e.cta_sample_clicked,
-          e.cta_website_clicked,
-          e.cta_escalated_to_human,
           e.total_score,
-          e.notes,
+          e.lead_status_tag,
+          e.demo_book_datetime,
+          e.reasoning,
+          e.smart_notification,
+          e.requirements,
+          e.custom_cta,
+          e.in_detail_summary,
           e.created_at,
           e.updated_at,
           c.customer_phone as conversation_customer_phone,
@@ -603,7 +600,7 @@ export class ExtractionsController {
       }
 
       if (has_demo === 'true') {
-        query += ` AND e.cta_demo_clicked = 'Yes'`;
+        query += ` AND e.demo_book_datetime IS NOT NULL`;
       }
 
       if (min_urgency) {
@@ -642,7 +639,6 @@ export class ExtractionsController {
           'name',
           'email',
           'company',
-          'intent',
           'intent_level',
           'intent_score',
           'urgency_level',
@@ -653,14 +649,13 @@ export class ExtractionsController {
           'fit_score',
           'engagement_health',
           'engagement_score',
-          'cta_pricing_clicked',
-          'cta_demo_clicked',
-          'cta_followup_clicked',
-          'cta_sample_clicked',
-          'cta_website_clicked',
-          'cta_escalated_to_human',
           'total_score',
-          'notes',
+          'lead_status_tag',
+          'demo_book_datetime',
+          'smart_notification',
+          'requirements',
+          'custom_cta',
+          'in_detail_summary',
           'agent_name',
           'platform',
           'phone_display_name',
@@ -744,12 +739,12 @@ export class ExtractionsController {
           timeFilter = '';
       }
 
-      // Build query (Migration 008 schema)
+      // Build query (Migration 032 schema)
       let query = `
         SELECT 
           COUNT(*) as total_extractions,
           COUNT(CASE WHEN e.email IS NOT NULL AND e.email != '' THEN 1 END) as with_email,
-          COUNT(CASE WHEN e.cta_demo_clicked = 'Yes' THEN 1 END) as with_demo,
+          COUNT(CASE WHEN e.demo_book_datetime IS NOT NULL THEN 1 END) as with_demo,
           COUNT(CASE WHEN e.urgency_score >= 2 THEN 1 END) as high_urgency,
           COUNT(CASE WHEN e.fit_score >= 2 THEN 1 END) as good_fit,
           COUNT(CASE WHEN e.engagement_score >= 2 THEN 1 END) as high_engagement,

@@ -389,6 +389,10 @@ export class App {
     this.app.get('/api/v1/button-clicks', externalApiController.listButtonClicks);
     this.app.get('/api/v1/leads/:customerPhone/button-activity', externalApiController.getLeadButtonActivity);
     
+    // Extractions / Lead Intelligence
+    this.app.get('/api/v1/extractions', externalApiController.getExtractions);
+    this.app.get('/api/v1/extractions/summaries', externalApiController.getExtractionSummaries);
+    
     // Messaging & Campaigns
     this.app.post('/api/v1/send', externalApiController.sendSingleMessage);
     this.app.get('/api/v1/campaigns', externalApiController.listCampaigns);

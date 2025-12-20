@@ -7,6 +7,7 @@ import {
     recordButtonClick, 
     findTemplateSendForButtonClick 
 } from '../services/templateService';
+import { campaignService } from '../services/campaignService';
 
 /**
  * Normalize phone number to E.164 format with + prefix
@@ -718,15 +719,63 @@ async function handleMessageDeliveryStatus(
             updateParams = [mappedStatus, errorMessage, platformMessageId];
         }
 
-        const templateSendUpdate = await db.query(updateQuery, updateParams);
+        const templateSendUpdate = await db.query<{ send_id: string; template_id: string; campaign_id: string | null }>(
+            updateQuery.replace('RETURNING send_id, template_id', 'RETURNING send_id, template_id, campaign_id'),
+            updateParams
+        );
 
         if (templateSendUpdate.rowCount && templateSendUpdate.rowCount > 0) {
+            const { send_id: sendId, template_id: templateId, campaign_id: campaignId } = templateSendUpdate.rows[0]!;
+            
             logger.info('Template send status updated', {
-                sendId: templateSendUpdate.rows[0].send_id,
-                templateId: templateSendUpdate.rows[0].template_id,
+                sendId,
+                templateId,
+                campaignId,
                 newStatus: mappedStatus,
                 correlationId,
             });
+
+            // If this template send is part of a campaign, update campaign_recipients status too
+            if (campaignId && (deliveryStatus === 'delivered' || deliveryStatus === 'read')) {
+                try {
+                    // Find the campaign recipient linked to this template_send
+                    const recipientResult = await db.query<{ recipient_id: string }>(
+                        `SELECT recipient_id FROM campaign_recipients WHERE template_send_id = $1`,
+                        [sendId]
+                    );
+
+                    if (recipientResult.rows.length > 0) {
+                        const recipientId = recipientResult.rows[0]!.recipient_id;
+                        
+                        // Update campaign_recipients status
+                        await campaignService.updateRecipientStatus(recipientId, mappedStatus as 'DELIVERED' | 'READ');
+                        
+                        logger.info('Campaign recipient status synced from template_sends', {
+                            recipientId,
+                            sendId,
+                            campaignId,
+                            newStatus: mappedStatus,
+                            correlationId,
+                        });
+
+                        // Sync campaign aggregate stats
+                        await campaignService.syncCampaignStats(campaignId);
+                        
+                        logger.debug('Campaign stats synced', {
+                            campaignId,
+                            correlationId,
+                        });
+                    }
+                } catch (syncError) {
+                    // Log but don't fail - template_sends update succeeded
+                    logger.error('Failed to sync campaign recipient status', {
+                        sendId,
+                        campaignId,
+                        error: syncError instanceof Error ? syncError.message : 'Unknown error',
+                        correlationId,
+                    });
+                }
+            }
         }
 
         // Log specific error codes for debugging and auto-update contact opt-out status

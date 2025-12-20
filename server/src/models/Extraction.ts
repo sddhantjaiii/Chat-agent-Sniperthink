@@ -37,14 +37,6 @@ export interface ExtractionData {
   engagement_health?: string; // Low, Medium, High
   engagement_score?: number; // 1-3
   
-  // CTA Tracking
-  cta_pricing_clicked?: string; // Yes, No
-  cta_demo_clicked?: string; // Yes, No
-  cta_followup_clicked?: string; // Yes, No
-  cta_sample_clicked?: string; // Yes, No
-  cta_website_clicked?: string; // Yes, No
-  cta_escalated_to_human?: string; // Yes, No
-  
   // Overall Scoring
   total_score?: number;
   lead_status_tag?: string; // Hot, Warm, Cold
@@ -52,11 +44,16 @@ export interface ExtractionData {
   // Demo Booking
   demo_book_datetime?: Date;
   
-  // Reasoning
+  // Reasoning (structured JSONB with intent, urgency, budget, fit, engagement, cta_behavior)
   reasoning?: ExtractionReasoning;
   
-  // Smart Notification
+  // Smart Notification (4-5 word summary)
   smart_notification?: string;
+  
+  // New fields for detailed extraction
+  requirements?: string; // Key requirements from conversation
+  custom_cta?: string; // Comma-separated list of custom CTAs
+  in_detail_summary?: string; // Detailed summary of the conversation
 }
 
 export interface Extraction extends ExtractionData {
@@ -113,12 +110,11 @@ export class ExtractionModel {
         budget_constraint, budget_score,
         fit_alignment, fit_score,
         engagement_health, engagement_score,
-        cta_pricing_clicked, cta_demo_clicked, cta_followup_clicked,
-        cta_sample_clicked, cta_website_clicked, cta_escalated_to_human,
-        total_score, lead_status_tag, smart_notification, reasoning, demo_book_datetime
+        total_score, lead_status_tag, smart_notification, reasoning, demo_book_datetime,
+        requirements, custom_cta, in_detail_summary
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 
-              $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+              $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
       RETURNING *
     `;
 
@@ -142,17 +138,14 @@ export class ExtractionModel {
       data.fit_score || null,
       data.engagement_health || null,
       data.engagement_score || null,
-      data.cta_pricing_clicked || null,
-      data.cta_demo_clicked || null,
-      data.cta_followup_clicked || null,
-      data.cta_sample_clicked || null,
-      data.cta_website_clicked || null,
-      data.cta_escalated_to_human || null,
       data.total_score || null,
       data.lead_status_tag || null,
       data.smart_notification || null,
       data.reasoning ? JSON.stringify(data.reasoning) : null,
-      data.demo_book_datetime || null
+      data.demo_book_datetime || null,
+      data.requirements || null,
+      data.custom_cta || null,
+      data.in_detail_summary || null
     ];
 
     try {
